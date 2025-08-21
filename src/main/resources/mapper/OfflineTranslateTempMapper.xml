@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.lijiahao.novelread.repo.mapper.OfflineTranslateTempMapper">
+
+    <resultMap id="BaseResultMap" type="com.lijiahao.read.entity.OfflineTranslateTemp">
+        <id column="id" property="id" />
+        <result column="translation_status" property="translationStatus" />
+        <result column="fail_count" property="failCount" />
+        <result column="translation_target_type" property="translationTargetType" />
+        <result column="file_name" property="fileName" />
+        <result column="progress" property="progress" />
+    </resultMap>
+
+    <sql id= "BaseColumns">
+        id, translation_status, fail_count, translation_target_type, file_name, progress
+    </sql>
+
+    <insert id="insertSelective" useGeneratedKeys="true" keyProperty="id">
+        insert into offline_translation_temp
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="translationStatus != null">translation_status,</if>
+            <if test="failCount != null">fail_count,</if>
+            <if test="translationTargetType != null">translation_target_type,</if>
+            <if test="fileName != null">file_name,</if>
+            <if test="progress != null">progress,</if>
+        </trim>
+        values
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="translationStatus != null">#{translationStatus},</if>
+            <if test="failCount != null">#{failCount},</if>
+            <if test="translationTargetType != null">#{translationTargetType},</if>
+            <if test="fileName != null">#{fileName},</if>
+            <if test="progress != null">#{progress},</if>
+        </trim>
+    </insert>
+
+    <update id="updateSelective">
+        <trim prefix="update offline_translation_temp set" suffixOverrides=",">
+            <if test="translationStatus != null">translation_status = #{translationStatus},</if>
+            <if test="failCount != null">fail_count = #{failCount},</if>
+            <if test="translationTargetType != null">translation_target_type = #{translationTargetType},</if>
+            <if test="fileName != null">file_name = #{fileName},</if>
+            <if test="progress != null">progress = #{progress},</if>
+        </trim>
+        WHERE id = #{id}
+    </update>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT <include refid="BaseColumns" />
+        FROM offline_translation_temp
+        WHERE id = #{id}
+    </select>
+
+    <select id="getByTranslationStatus" resultMap="BaseResultMap">
+        SELECT <include refid="BaseColumns" />
+        FROM offline_translation_temp
+        WHERE translation_status in
+        <foreach item="item" collection="translationStatus" open="(" separator="," close=")">
+            #{item}
+        </foreach>
+        limit 1
+    </select>
+
+
+</mapper>
