@@ -4,6 +4,7 @@ import com.alibaba.fastjson2.JSON;
 import com.knuddels.jtokkit.Encodings;
 import com.knuddels.jtokkit.api.Encoding;
 import com.read.duolingo.enums.TranslatorType;
+import com.read.duolingo.utils.StringUtil;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -26,7 +27,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Component
 public class LocalSeedXTranslator implements Translator {
 
-    private RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate = new RestTemplate();
 
     private final static Integer seedXTotalMaxTokens = 51000;
     private final AtomicInteger currentSeedXTokens = new AtomicInteger(0);
@@ -69,7 +70,7 @@ public class LocalSeedXTranslator implements Translator {
     }
 
     public CompletableFuture<String> asyncTranslate(String source, String langCode, boolean isOnline) {
-        String prompt = "translate the following:" + source + "<" + langCode + ">";
+        String prompt = "translate the following:" + StringUtil.escapeJson(source) + "<" + langCode + ">";
         if(StringUtils.isBlank(prompt)){
             return CompletableFuture.completedFuture("");
         }

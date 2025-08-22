@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS offline_translation_temp (
     id BIGINT UNSIGNED AUTO_INCREMENT COMMENT '主键ID',
     translation_status TINYINT COMMENT '翻译状态',
     file_name VARCHAR(255) NOT NULL DEFAULT '' COMMENT '文件名',
-    translation_target_type TINYINT NOT NULL DEFAULT 1 COMMENT '翻译目标类型',
+    lang_code VARCHAR(255) NOT NULL DEFAULT '' COMMENT '语言代码',
     fail_count INT NOT NULL DEFAULT 0 COMMENT '失败次数',
     progress INT NOT NULL DEFAULT 0 COMMENT '翻译进度',
     create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
