@@ -58,7 +58,7 @@ public class TranslateController {
     @RequestMapping("/online/invoke")
     public Response<String> invokeOnlineTranslate(@RequestParam("source") String source,
                                                 @RequestParam("langCode") String langCode,
-                                                @RequestParam("translator") String translator
+                                                @RequestParam(value = "translator", required = false, defaultValue = "LOCAL_SEED_X") String translator
     ) {
         try {
             return Response.success(translateService.translateSource(List.of(source), langCode, true, translator).getFirst());
