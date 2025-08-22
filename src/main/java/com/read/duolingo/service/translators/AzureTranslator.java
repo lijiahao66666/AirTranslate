@@ -175,4 +175,16 @@ public class AzureTranslator implements Translator {
         return TranslatorType.AZURE;
     }
 
+    public static void main(String[] args) {
+        try {
+            // 测试实际翻译
+            String s = new AzureTranslator().queryAzure("你是谁&q=我是了", "en");
+            System.out.println("中文翻译英文: " + s);
+
+        } catch (Exception e) {
+            log.error("AzureTranslator main error", e);
+            e.printStackTrace();
+        }
+    }
+
 }

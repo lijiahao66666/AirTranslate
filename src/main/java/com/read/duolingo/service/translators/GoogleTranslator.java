@@ -3,7 +3,9 @@ package com.read.duolingo.service.translators;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 
@@ -16,8 +18,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Component;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 
 @Slf4j
@@ -52,28 +57,27 @@ public class GoogleTranslator implements Translator{
         }
 
         String url = "https://translate.googleapis.com/translate_a/single";
-        String params = "?client=gtx&sl=auto&tl=" + URLEncoder.encode(targetLang, StandardCharsets.UTF_8) +
-                "&dt=t&q=" + URLEncoder.encode(StringUtil.escapeJson(source), StandardCharsets.UTF_8);
+
+        // 使用表单参数而不是URL参数
+        MultiValueMap<String, String> formData = new LinkedMultiValueMap<>();
+        formData.add("client", "gtx");
+        formData.add("sl", "auto");
+        formData.add("tl", targetLang);
+        formData.add("dt", "t");
+        formData.add("q", source);  // 直接使用原始文本，不需要URL编码
 
         HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
         headers.set("User-Agent", "Mozilla/5.0");
-        HttpEntity<String> entity = new HttpEntity<>(headers);
+        HttpEntity<MultiValueMap<String, String>> entity = new HttpEntity<>(formData, headers);
 
-        // 使用Object数组接收响应，因为Google翻译API的响应格式不是标准的JSON对象
-        Object[] response = restTemplate.exchange(
-                url + params,
-                HttpMethod.GET,
-                entity,
-                Object[].class
-        ).getBody();
+        Object[] response = restTemplate.postForObject(url, entity, Object[].class);
 
         // 解析Google翻译响应
         if (response != null && response.length > 0 && response[0] instanceof List<?> firstElement) {
             if (!firstElement.isEmpty() && firstElement.getFirst() instanceof List<?> translationData) {
                 if (!translationData.isEmpty() && translationData.getFirst() instanceof String result) {
-                    // 先替换全角百分号为半角百分号，再进行URL解码
-                    result = result.replace("％", "%").replace(" ", "");
-                    return URLDecoder.decode(result, StandardCharsets.UTF_8);
+                    return result;
                 }
             }
         }
@@ -90,8 +94,9 @@ public class GoogleTranslator implements Translator{
     public static void main(String[] args) {
         try {
             // 测试实际翻译
-            String s = new GoogleTranslator().queryGoogle("你是一个什么人？", "en");
-            System.out.println("Translations: " + s);
+            String s = new GoogleTranslator().queryGoogle("你是谁&q=我是李家豪", "en");
+            System.out.println("中文翻译英文: " + s);
+
         } catch (Exception e) {
             log.error("GoogleTranslator main error", e);
             e.printStackTrace();
