@@ -3,6 +3,7 @@ package com.read.duolingo.service.translators;
 import com.alibaba.fastjson2.JSON;
 import com.knuddels.jtokkit.Encodings;
 import com.knuddels.jtokkit.api.Encoding;
+import com.read.duolingo.enums.TranslatorType;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -11,7 +12,7 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
-import org.springframework.stereotype.Service;
+import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.List;
@@ -22,8 +23,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
 @Setter
-@Service
-public class LocalSeedXTranslator {
+@Component
+public class LocalSeedXTranslator implements Translator {
 
     private RestTemplate restTemplate = new RestTemplate();
 
@@ -67,7 +68,8 @@ public class LocalSeedXTranslator {
         }
     }
 
-    public CompletableFuture<String> seedGenerateText(String prompt, boolean isOnline) {
+    public CompletableFuture<String> asyncTranslate(String source, String langCode, boolean isOnline) {
+        String prompt = "translate the following:" + source + "<" + langCode + ">";
         if(StringUtils.isBlank(prompt)){
             return CompletableFuture.completedFuture("");
         }
@@ -78,6 +80,7 @@ public class LocalSeedXTranslator {
 
         return future;
     }
+
 
     // 优先级任务内部类
     private class PriorityTask implements Runnable, Comparable<PriorityTask> {
@@ -251,6 +254,10 @@ public class LocalSeedXTranslator {
 
 
         }
+    }
+
+    public TranslatorType getTranslatorType() {
+        return TranslatorType.LOCAL_SEED_X;
     }
 
 }

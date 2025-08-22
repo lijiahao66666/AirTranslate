@@ -3,8 +3,9 @@ package com.read.duolingo.service;
 import com.read.duolingo.entity.OfflineTranslateTemp;
 import com.read.duolingo.enums.LanguageType;
 import com.read.duolingo.enums.TranslationStatus;
+import com.read.duolingo.enums.TranslatorType;
 import com.read.duolingo.repo.TranslateRepository;
-import com.read.duolingo.service.translators.LocalSeedXTranslator;
+import com.read.duolingo.service.translators.Translator;
 import com.read.duolingo.utils.FutureUtil;
 import com.read.duolingo.utils.HtmlUtil;
 import com.read.duolingo.utils.ZipUtil;
@@ -33,11 +34,11 @@ public class TranslateService {
     @Resource
     private TranslateRepository translateRepository;
     @Resource
-    private LocalSeedXTranslator localSeedXTranslator;
+    private List<Translator> translators;
 
 
     private static final String TRANSLATION = System.getProperty("user.dir") + "/translation";
-
+    private static final TranslatorType offlineTranslateUseTranslatorType = TranslatorType.LOCAL_SEED_X;
 
     private final ThreadPoolTaskExecutor offlineLlmTaskExecutor = new ThreadPoolTaskExecutor();
     {
@@ -81,7 +82,7 @@ public class TranslateService {
             ZipUtil.unzipEpub(getFileDir(offlineTranslateTemp.getId(), true) + offlineTranslateTemp.getFileName(), tempDir);
             // 处理 HTML 文件
             HtmlUtil.processHtmlFiles(tempDir, (progress, sources) -> {
-                List<String> targets = llmTranslateSource(sources, offlineTranslateTemp.getLangCode(), false);
+                List<String> targets = translateSource(sources, offlineTranslateTemp.getLangCode(), false, offlineTranslateUseTranslatorType.name());
                 offlineTranslateTemp.setProgress(progress);
                 translateRepository.updateOfflineTranslateTemp(offlineTranslateTemp);
                 return targets;
@@ -106,15 +107,16 @@ public class TranslateService {
         }
     }
 
-    public List<String> llmTranslateSource(List<String> sourceList, String langCode, boolean isOnline) {
+    public List<String> translateSource(List<String> sourceList, String langCode, boolean isOnline, String translator) {
         if (CollectionUtils.isEmpty(sourceList)) {
             return new ArrayList<>();
         }
         // 校验langCode
-        LanguageType languageType = LanguageType.valueOfLangCode(langCode);
+        LanguageType.valueOfLangCode(langCode);
+        // 校验translator
+        Translator realTranslator = translators.stream().filter(t -> t.getTranslatorType().name().equals(translator)).findFirst().orElseThrow(() -> new IllegalArgumentException("translator is not support"));
         // 使用seed-x翻译
-        List<CompletableFuture<String>> futures = sourceList.stream().map(source -> localSeedXTranslator.seedGenerateText("translate the following:" + source + languageType.getLangCode(), isOnline)).toList();
-        List<String> targets = FutureUtil.collectFutures(futures);
+        List<String> targets = realTranslator.translate(sourceList, langCode, isOnline);
         log.info("翻译结果translateResult: {}", targets);
         return targets;
     }

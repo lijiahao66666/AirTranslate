@@ -57,9 +57,11 @@ public class TranslateController {
     @CrossOrigin
     @RequestMapping("/online/invoke")
     public Response<String> invokeOnlineTranslate(@RequestParam("source") String source,
-                                                @RequestParam("langCode") String langCode) {
+                                                @RequestParam("langCode") String langCode,
+                                                @RequestParam("translator") String translator
+    ) {
         try {
-            return Response.success(translateService.llmTranslateSource(List.of(source), langCode, true).getFirst());
+            return Response.success(translateService.translateSource(List.of(source), langCode, true, translator).getFirst());
         }catch (Exception e){
             log.error("online translate submit error", e);
             return Response.fail(500, e.getMessage());
