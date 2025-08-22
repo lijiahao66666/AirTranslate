@@ -28,7 +28,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 
 @Slf4j
 @Service
-@Conditional(GPUPresentCondition.class)
 public class TranslateService {
 
     @Resource
@@ -54,10 +53,6 @@ public class TranslateService {
      */
     //    @Scheduled(fixedDelay = 1000)
     public void offlineTranslate() {
-        // 双重校验：防止条件被绕过或检测逻辑变更时的安全冗余
-        if (!checkGPUAvailable()) {
-            return;
-        }
         // 获取翻译任务
         OfflineTranslateTemp offlineTranslateTemp = translateRepository.getOfflineTranslateTempByTranslationStatus(List.of(TranslationStatus.NOT_START.getValue()));
         if (offlineTranslateTemp == null) {
