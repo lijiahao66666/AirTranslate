@@ -17,7 +17,7 @@
 ## Seed-X 本地部署指南
 
 ### 我的测试环境
-- 显卡：RTX4090 16GB
+- 显卡：RTX4060 16GB
 - 系统：Windows（使用 Docker）
 - 模型：[Seed-X-PPO-7B-GPTQ-Int8 量化版](https://www.modelscope.cn/models/ByteDance-Seed/Seed-X-PPO-7B-GPTQ-Int8)
 
