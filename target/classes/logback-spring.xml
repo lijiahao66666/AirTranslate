@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration scan="true" scanPeriod="30 seconds">
+    <!-- 基础配置 -->
+    <property name="LOG_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"/>
+    <property name="LOG_BASE_DIR" value="."/>
+
+    <property name="LOG_FILE_NAME" value="app"/>
+    <property name="MAX_HISTORY" value="90"/>
+    <property name="TOTAL_SIZE_CAP" value="5GB"/>
+    <property name="MAX_FILE_SIZE" value="500MB"/>
+
+    <!-- 控制台输出 -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- 文件输出：按日期和大小分割 -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_BASE_DIR}/${LOG_FILE_NAME}.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <!-- 文件名格式：基础名-日期-序号.log -->
+            <fileNamePattern>${LOG_BASE_DIR}/${LOG_FILE_NAME}-%d{yyyy-MM-dd}-%i.log</fileNamePattern>
+            <!-- 每天轮转，保留历史天数 -->
+            <maxHistory>${MAX_HISTORY}</maxHistory>
+            <!-- 单个文件大小限制 -->
+            <maxFileSize>${MAX_FILE_SIZE}</maxFileSize>
+            <!-- 总大小限制 -->
+            <totalSizeCap>${TOTAL_SIZE_CAP}</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- 根日志级别 -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+
+    <!-- 应用包日志级别 -->
+    <logger name="com.lijiahao.read" level="INFO" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </logger>
+
+</configuration>
