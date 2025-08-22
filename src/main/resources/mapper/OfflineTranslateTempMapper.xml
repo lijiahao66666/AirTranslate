@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.lijiahao.novelread.repo.mapper.OfflineTranslateTempMapper">
+<mapper namespace="com.read.duolingo.repo.mapper.OfflineTranslateTempMapper">
 
-    <resultMap id="BaseResultMap" type="com.lijiahao.read.entity.OfflineTranslateTemp">
+    <resultMap id="BaseResultMap" type="com.read.duolingo.entity.OfflineTranslateTemp">
         <id column="id" property="id" />
         <result column="translation_status" property="translationStatus" />
         <result column="fail_count" property="failCount" />
-        <result column="translation_target_type" property="translationTargetType" />
+        <result column="lang_code" property="langCode" />
         <result column="file_name" property="fileName" />
         <result column="progress" property="progress" />
     </resultMap>
@@ -20,7 +20,7 @@
         <trim prefix="(" suffix=")" suffixOverrides=",">
             <if test="translationStatus != null">translation_status,</if>
             <if test="failCount != null">fail_count,</if>
-            <if test="translationTargetType != null">translation_target_type,</if>
+            <if test="langCode != null">lang_code,</if>
             <if test="fileName != null">file_name,</if>
             <if test="progress != null">progress,</if>
         </trim>
@@ -28,7 +28,7 @@
         <trim prefix="(" suffix=")" suffixOverrides=",">
             <if test="translationStatus != null">#{translationStatus},</if>
             <if test="failCount != null">#{failCount},</if>
-            <if test="translationTargetType != null">#{translationTargetType},</if>
+            <if test="langCode != null">#{langCode},</if>
             <if test="fileName != null">#{fileName},</if>
             <if test="progress != null">#{progress},</if>
         </trim>
@@ -38,7 +38,7 @@
         <trim prefix="update offline_translation_temp set" suffixOverrides=",">
             <if test="translationStatus != null">translation_status = #{translationStatus},</if>
             <if test="failCount != null">fail_count = #{failCount},</if>
-            <if test="translationTargetType != null">translation_target_type = #{translationTargetType},</if>
+            <if test="langCode != null">lang_code = #{langCode},</if>
             <if test="fileName != null">file_name = #{fileName},</if>
             <if test="progress != null">progress = #{progress},</if>
         </trim>
