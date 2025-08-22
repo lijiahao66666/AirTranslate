@@ -94,7 +94,7 @@ public class GoogleTranslator implements Translator{
     public static void main(String[] args) {
         try {
             // 测试实际翻译
-            String s = new GoogleTranslator().queryGoogle("你是谁&q=我是李家豪", "en");
+            String s = new GoogleTranslator().queryGoogle("你是谁&q=我是d", "en");
             System.out.println("中文翻译英文: " + s);
 
         } catch (Exception e) {
