@@ -8,16 +8,12 @@
   - 本地SeedX AI翻译（测试优于传统翻译引擎，且同等模型参数也优于通用文本生成类型模型）
   - 微软翻译Azure
   - 谷歌翻译Google
-  - 陆续接入其他翻译...
+
 
 ## 应用介绍
 1. 这个是Java后端（前端代码还没完成）
 2. 集成本地部署的 Seed-X AI 模型作为翻译引擎，提升翻译质量
 3. 支持上传 EPUB 书籍并离线生成双语版本
-
-## 测试
-1. http://112.124.50.176:8080/translate/online/invoke?source=hello&langCode=zh
-
 ---
 
 ## Seed-X 本地部署指南
