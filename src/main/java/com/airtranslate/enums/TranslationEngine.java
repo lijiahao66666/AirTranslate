@@ -4,6 +4,7 @@ import lombok.Getter;
 
 @Getter
 public enum TranslationEngine {
-    HY
+    HY,
+    AZURE,
+    GOOGLE
 }
-

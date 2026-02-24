@@ -8,6 +8,7 @@ import com.airtranslate.enums.TranslatorType;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import jakarta.annotation.PostConstruct;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -31,10 +32,18 @@ public class LocalHyTranslator implements Translator {
     @Value("${hy.completionsUrl:http://localhost:8000/v1/completions}")
     private String completionsUrl;
 
-    public LocalHyTranslator() {
-        executor.setCorePoolSize(8);
-        executor.setMaxPoolSize(8);
-        executor.setQueueCapacity(200);
+    @Value("${hy.poolSize:8}")
+    private int poolSize;
+
+    @Value("${hy.queueCapacity:200}")
+    private int queueCapacity;
+
+    @PostConstruct
+    public void initExecutor() {
+        executor.setCorePoolSize(poolSize);
+        executor.setMaxPoolSize(poolSize);
+        executor.setQueueCapacity(queueCapacity);
+        executor.setThreadNamePrefix("hy-");
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
         executor.initialize();
     }

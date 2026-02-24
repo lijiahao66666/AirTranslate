@@ -15,6 +15,8 @@ import com.airtranslate.enums.TranslatorType;
 import com.airtranslate.utils.StringUtil;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -32,10 +34,19 @@ public class GoogleTranslator implements Translator{
     private final RestTemplate restTemplate = new RestTemplate();
     private final ThreadPoolTaskExecutor googleExecutor = new ThreadPoolTaskExecutor();
 
-    public GoogleTranslator() {
-        googleExecutor.setCorePoolSize(100);
-        googleExecutor.setMaxPoolSize(100);
-        googleExecutor.setRejectedExecutionHandler(new ThreadPoolExecutor.DiscardPolicy());
+    @Value("${google.poolSize:8}")
+    private int poolSize;
+
+    @Value("${google.queueCapacity:200}")
+    private int queueCapacity;
+
+    @PostConstruct
+    public void initExecutor() {
+        googleExecutor.setCorePoolSize(poolSize);
+        googleExecutor.setMaxPoolSize(poolSize);
+        googleExecutor.setQueueCapacity(queueCapacity);
+        googleExecutor.setThreadNamePrefix("google-");
+        googleExecutor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
         googleExecutor.initialize();
     }
 
@@ -52,7 +63,7 @@ public class GoogleTranslator implements Translator{
     }
 
     private String queryGoogle(String source, String targetLang) throws Exception {
-        if (source.isEmpty()) {
+        if (source == null || source.isBlank()) {
             return "";
         }
 

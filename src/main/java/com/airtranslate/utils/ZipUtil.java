@@ -3,7 +3,9 @@ package com.airtranslate.utils;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.Enumeration;
+import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
@@ -11,11 +13,15 @@ import java.util.zip.ZipOutputStream;
 public class ZipUtil {
 
     public static void unzipEpub(String epubPath, Path destDir) throws IOException {
+        Path base = destDir.toAbsolutePath().normalize();
         try (ZipFile zipFile = new ZipFile(new File(epubPath))) {
             Enumeration<? extends ZipEntry> entries = zipFile.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
-                Path entryPath = destDir.resolve(entry.getName());
+                Path entryPath = base.resolve(entry.getName()).normalize();
+                if (!entryPath.startsWith(base)) {
+                    throw new IOException("Invalid zip entry: " + entry.getName());
+                }
 
                 if (entry.isDirectory()) {
                     Files.createDirectories(entryPath);
@@ -35,22 +41,41 @@ public class ZipUtil {
     }
 
     public static void zipEpub(Path sourceDir, String outputPath) throws IOException {
-        try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(outputPath))) {
-            Files.walk(sourceDir)
-                    .filter(path -> !Files.isDirectory(path))
-                    .forEach(path -> {
-                        try {
-                            String entryName = sourceDir.relativize(path).toString().replace("\\", "/");
-                            ZipEntry zipEntry = new ZipEntry(entryName);
-                            zos.putNextEntry(zipEntry);
+        Path base = sourceDir.toAbsolutePath().normalize();
+        Path mimetypePath = base.resolve("mimetype");
+        try (ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(outputPath)))) {
+            if (Files.exists(mimetypePath) && Files.isRegularFile(mimetypePath)) {
+                byte[] bytes = Files.readAllBytes(mimetypePath);
+                CRC32 crc32 = new CRC32();
+                crc32.update(bytes);
+                ZipEntry zipEntry = new ZipEntry("mimetype");
+                zipEntry.setMethod(ZipEntry.STORED);
+                zipEntry.setSize(bytes.length);
+                zipEntry.setCompressedSize(bytes.length);
+                zipEntry.setCrc(crc32.getValue());
+                zos.putNextEntry(zipEntry);
+                zos.write(bytes);
+                zos.closeEntry();
+            }
 
-                            byte[] bytes = Files.readAllBytes(path);
-                            zos.write(bytes);
-                            zos.closeEntry();
-                        } catch (IOException e) {
-                            throw new UncheckedIOException(e);
-                        }
-                    });
+            try (var stream = Files.walk(base)) {
+                stream.filter(path -> Files.isRegularFile(path))
+                        .filter(path -> !path.equals(mimetypePath))
+                        .sorted(Comparator.comparing(p -> base.relativize(p).toString()))
+                        .forEach(path -> {
+                            String entryName = base.relativize(path).toString().replace("\\", "/");
+                            ZipEntry zipEntry = new ZipEntry(entryName);
+                            try {
+                                zos.putNextEntry(zipEntry);
+                                try (InputStream in = Files.newInputStream(path)) {
+                                    in.transferTo(zos);
+                                }
+                                zos.closeEntry();
+                            } catch (IOException e) {
+                                throw new UncheckedIOException(e);
+                            }
+                        });
+            }
         }
     }
 

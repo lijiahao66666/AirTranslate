@@ -7,13 +7,18 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+
 import com.airtranslate.enums.TranslatorType;
-import com.airtranslate.utils.StringUtil;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
@@ -26,10 +31,19 @@ public class AzureTranslator implements Translator {
     private static TokenCache tokenCache = null;
     private final ThreadPoolTaskExecutor azureExecutor = new ThreadPoolTaskExecutor();
 
-    public AzureTranslator() {
-        azureExecutor.setCorePoolSize(100);
-        azureExecutor.setMaxPoolSize(100);
-        azureExecutor.setRejectedExecutionHandler(new ThreadPoolExecutor.DiscardPolicy());
+    @Value("${azure.poolSize:8}")
+    private int poolSize;
+
+    @Value("${azure.queueCapacity:200}")
+    private int queueCapacity;
+
+    @PostConstruct
+    public void initExecutor() {
+        azureExecutor.setCorePoolSize(poolSize);
+        azureExecutor.setMaxPoolSize(poolSize);
+        azureExecutor.setQueueCapacity(queueCapacity);
+        azureExecutor.setThreadNamePrefix("azure-");
+        azureExecutor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
         azureExecutor.initialize();
     }
 
@@ -46,7 +60,7 @@ public class AzureTranslator implements Translator {
     }
 
     private String queryAzure(String source, String targetLang) throws Exception {
-        if (source.isEmpty()) {
+        if (source == null || source.isBlank()) {
             return "";
         }
 
@@ -56,19 +70,24 @@ public class AzureTranslator implements Translator {
         String params = "?to=" + URLEncoder.encode(msTargetLang, StandardCharsets.UTF_8) + "&api-version=3.0";
 
         String token = getAuthToken();
+        if (token == null || token.isBlank()) {
+            throw new IllegalStateException("azure token empty");
+        }
         
         HttpHeaders headers = new HttpHeaders();
-        headers.set("Content-Type", "application/json");
+        headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set("Authorization", "Bearer " + token);
         
         TranslationRequest request = new TranslationRequest(source);
         HttpEntity<TranslationRequest[]> entity = new HttpEntity<>(new TranslationRequest[]{request}, headers);
 
-        TranslationResponse[] response = restTemplate.postForObject(
+        ResponseEntity<TranslationResponse[]> responseEntity = restTemplate.exchange(
                 url + params,
+                HttpMethod.POST,
                 entity,
                 TranslationResponse[].class
         );
+        TranslationResponse[] response = responseEntity.getBody();
 
         if (response != null && response.length > 0 && response[0].getTranslations() != null 
                 && response[0].getTranslations().length > 0) {
@@ -86,13 +105,14 @@ public class AzureTranslator implements Translator {
         
         HttpHeaders headers = new HttpHeaders();
         headers.set("User-Agent", "Mozilla/5.0");
-        HttpEntity<String> entity = new HttpEntity<>(headers);
-        
-        String token = restTemplate.getForObject(
+        HttpEntity<Void> entity = new HttpEntity<>(headers);
+        ResponseEntity<String> resp = restTemplate.exchange(
                 "https://edge.microsoft.com/translate/auth",
-                String.class,
-                entity
+                HttpMethod.GET,
+                entity,
+                String.class
         );
+        String token = resp.getBody();
 
         long expiresAt = now + TimeUnit.MINUTES.toMillis(8); // 8 minutes expiration
 
@@ -154,7 +174,7 @@ public class AzureTranslator implements Translator {
         private String Text;
 
         public TranslationRequest(String text) {
-            Text = StringUtil.escapeJson(text);
+            Text = text;
         }
     }
 

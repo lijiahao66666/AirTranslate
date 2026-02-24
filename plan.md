@@ -48,7 +48,7 @@
 - CREATED → UPLOADED → PARSING → TRANSLATING → PACKAGING → UPLOADING_RESULT → DONE
 - 任意阶段可到 FAILED / CANCELED
 
-进度计算：以“翻译单元 unit（段落块）”为最小 checkpoint；每完成一个 unit 更新一次 progress，保证断点续跑与失败重试粒度足够小。
+进度计算：以“章节（对应 spine 里的 xhtml/html 文件）”为最小 checkpoint；每完成一个章节更新一次 progress。v1 不做 unit 级断点续跑，失败后从章节重新开始即可。
 
 ## 4. 翻译模式与输出
 
@@ -212,4 +212,3 @@ GPU Worker 采用“轮转 + 配额”：
 
 - GPU 轮转调度（quotaUnits）
 - 自启、日志、清理策略、故障恢复完善
-

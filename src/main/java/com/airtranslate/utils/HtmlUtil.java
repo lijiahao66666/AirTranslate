@@ -20,7 +20,6 @@ public class HtmlUtil {
     private static final String TRANSLATION_ATTR = "data-translation"; // 统一的属性名
     private static final String ORIGINAL_VALUE = "original"; // 原文标签的值
     private static final String TRANSLATED_VALUE = "translated"; // 翻译标签的值
-    private static final Pattern CHINESE_PATTERN = Pattern.compile("[\\u4e00-\\u9fa5]");
     private static final Pattern SKIP_TAGS = Pattern.compile("(script|style|code|pre)", Pattern.CASE_INSENSITIVE);
 
 
@@ -252,8 +251,8 @@ public class HtmlUtil {
                 // 检查文本节点是否已被包裹在翻译容器中
                 if (isProcessed(textNode)) continue;
 
-                String text = textNode.getWholeText().trim();
-                if (!text.isEmpty() && containsChinese(text)) {
+                String text = textNode.getWholeText();
+                if (isTranslatableText(text)) {
                     textNodes.add(textNode);
                 }
             }
@@ -321,8 +320,15 @@ public class HtmlUtil {
                 element.parents().stream().anyMatch(e -> e.hasClass("translation-container"));
     }
 
-    private static boolean containsChinese(String text) {
-        return text != null && CHINESE_PATTERN.matcher(text).find();
+    private static boolean isTranslatableText(String text) {
+        if (text == null) {
+            return false;
+        }
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) {
+            return false;
+        }
+        return trimmed.codePoints().anyMatch(Character::isLetter);
     }
 
     public static int countTranslatableChars(Path rootDir) throws IOException {

@@ -2,6 +2,8 @@ package com.airtranslate.job;
 
 import com.airtranslate.job.model.JobSpec;
 import com.airtranslate.scf.ScfClient;
+import com.airtranslate.translators.AzureTranslator;
+import com.airtranslate.translators.GoogleTranslator;
 import com.airtranslate.translators.LocalHyTranslator;
 import com.airtranslate.utils.HtmlUtil;
 import com.airtranslate.utils.ZipUtil;
@@ -51,6 +53,8 @@ public class JobWorker {
 
     private final ScfClient scfClient;
     private final LocalHyTranslator localHyTranslator;
+    private final AzureTranslator azureTranslator;
+    private final GoogleTranslator googleTranslator;
     private final BillingSettings billingSettings;
 
     @Scheduled(fixedDelayString = "${job.worker.pollDelayMs:1000}")
@@ -94,13 +98,23 @@ public class JobWorker {
             Files.createDirectories(unpackDir);
             ZipUtil.unzipEpub(sourceEpub.toString(), unpackDir);
 
+            TranslationEngine engine = job.getEngine() == null ? TranslationEngine.HY : job.getEngine();
             TranslationOutput output = job.getOutput() == null ? TranslationOutput.TRANSLATED_ONLY : job.getOutput();
             TranslationMode mode = job.getMode() == null ? TranslationMode.PARAGRAPH : job.getMode();
-            String glossaryPrompt = buildGlossaryPrompt(job.getGlossaryCosKey());
-            JobBilling billing = initBilling(jobId, job);
+            if (mode == TranslationMode.CHAPTER && engine != TranslationEngine.HY) {
+                mode = TranslationMode.PARAGRAPH;
+            }
+            String glossaryPrompt = engine == TranslationEngine.HY ? buildGlossaryPrompt(job.getGlossaryCosKey()) : "";
+            JobBilling billing = initBilling(jobId, job, engine);
 
             billEstimateIfNeeded(jobId, billing, unpackDir);
-            updateProgress(jobId, p -> p.setState(JobState.TRANSLATING));
+            TranslationMode finalMode = mode;
+            updateProgress(jobId, p -> {
+                p.setEngine(engine);
+                p.setMode(finalMode);
+                p.setOutput(output);
+                p.setState(JobState.TRANSLATING);
+            });
             HtmlUtil.processHtmlFiles(unpackDir, output, ctx -> {
                 int percent = ctx.getProgressPercent();
                 int chapterIndex = ctx.getChapterIndex();
@@ -115,7 +129,14 @@ public class JobWorker {
                     p.setCurrentChapter(cp);
                 });
 
-                if (mode == TranslationMode.CHAPTER) {
+                if (engine == TranslationEngine.AZURE) {
+                    return azureTranslator.translate(sources, job.getTargetLang(), true);
+                }
+                if (engine == TranslationEngine.GOOGLE) {
+                    return googleTranslator.translate(sources, job.getTargetLang(), true);
+                }
+
+                if (finalMode == TranslationMode.CHAPTER) {
                     return translateHyChapter(job.getTargetLang(), sources, glossaryPrompt);
                 }
 
@@ -155,8 +176,8 @@ public class JobWorker {
         }
     }
 
-    private JobBilling initBilling(String jobId, JobSpec job) {
-        if (job.getEngine() != TranslationEngine.HY) {
+    private JobBilling initBilling(String jobId, JobSpec job, TranslationEngine engine) {
+        if (engine != TranslationEngine.HY) {
             return null;
         }
         JobBilling billing = scfClient.getBilling(jobId);
