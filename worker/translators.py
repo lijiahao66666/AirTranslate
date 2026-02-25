@@ -1,7 +1,7 @@
 """
 翻译引擎模块
 - 机器翻译：Azure Edge → MyMemory → Google (链式退避，国内优先)
-- AI翻译：本地 vLLM HY-MT1.5 (支持上下文 + 术语表)
+- AI翻译：本地 transformers HY-MT1.5 (支持上下文 + 术语表)
 """
 
 import logging
@@ -11,11 +11,16 @@ import urllib.parse
 from typing import Optional
 
 import httpx
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 log = logging.getLogger(__name__)
 
-VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:8000")
+MODEL_PATH = os.getenv("MODEL_PATH", "")
 MYMEMORY_EMAIL = os.getenv("MYMEMORY_EMAIL", "")
+
+# 懒加载模型 (首次调用 AI 翻译时才加载)
+_model_cache: dict = {"model": None, "tokenizer": None, "loaded": False}
 
 # ---------------------------------------------------------------------------
 # 自定义异常
@@ -188,16 +193,41 @@ def _translate_google(texts: list[str], src_lang: str, tgt_lang: str) -> list[st
 
 
 # ---------------------------------------------------------------------------
-# AI翻译：本地 vLLM HY-MT1.5
+# AI翻译：本地 transformers HY-MT1.5
 # ---------------------------------------------------------------------------
 
-# HY-MT1.5 官方推理参数
-_HY_PARAMS = {
+# HY-MT1.5 官方推荐推理参数
+_HY_GEN_KWARGS = {
     "top_k": 20,
     "top_p": 0.6,
     "temperature": 0.7,
     "repetition_penalty": 1.05,
 }
+
+
+def _ensure_model_loaded():
+    """懒加载模型和 tokenizer，首次调用时加载到 GPU"""
+    if _model_cache["loaded"]:
+        return _model_cache["model"], _model_cache["tokenizer"]
+
+    model_path = MODEL_PATH
+    if not model_path:
+        raise TranslateError("MODEL_PATH not set in .env")
+
+    log.info("Loading HY-MT1.5 model from %s ...", model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        device_map="auto",
+        torch_dtype=torch.bfloat16,
+    )
+    model.eval()
+    log.info("Model loaded successfully on %s", next(model.parameters()).device)
+
+    _model_cache["model"] = model
+    _model_cache["tokenizer"] = tokenizer
+    _model_cache["loaded"] = True
+    return model, tokenizer
 
 
 def _build_ai_prompt(
@@ -241,40 +271,46 @@ def translate_ai(
     context: Optional[str] = None,
     glossary: Optional[dict] = None,
 ) -> list[str]:
-    """AI翻译：调用本地 vLLM HY-MT1.5
-    逐段翻译，每段独立调用 vLLM (段落翻译模式)
+    """AI翻译：本地 transformers HY-MT1.5
+    逐段翻译，每段独立推理 (段落翻译模式)
     """
+    model, tokenizer = _ensure_model_loaded()
     results = []
+
     for text in texts:
         if not text or not text.strip():
             results.append(text)
             continue
 
         prompt = _build_ai_prompt(text, src_lang, tgt_lang, context, glossary)
+        messages = [{"role": "user", "content": prompt}]
 
         try:
-            resp = httpx.post(
-                f"{VLLM_BASE_URL}/v1/completions",
-                json={
-                    "prompt": prompt,
-                    "max_tokens": max(len(text) * 3, 512),
-                    **_HY_PARAMS,
-                },
-                timeout=120,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            input_ids = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=False,
+                return_tensors="pt",
+            ).to(model.device)
 
-            choices = data.get("choices", [])
-            if choices:
-                result = choices[0].get("text", "").strip()
-                # 去掉模型可能输出的注释 "（注..."
-                note_idx = result.find("（注")
-                if note_idx != -1:
-                    result = result[:note_idx].strip()
-                results.append(result if result else text)
-            else:
-                results.append(text)
+            max_new = max(len(text) * 3, 512)
+            with torch.no_grad():
+                output_ids = model.generate(
+                    input_ids,
+                    max_new_tokens=max_new,
+                    do_sample=True,
+                    **_HY_GEN_KWARGS,
+                )
+
+            # 只取新生成的 token
+            new_tokens = output_ids[0][input_ids.shape[-1]:]
+            result = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+            # 去掉模型可能输出的注释 "（注..."
+            note_idx = result.find("（注")
+            if note_idx != -1:
+                result = result[:note_idx].strip()
+            results.append(result if result else text)
         except Exception as e:
             log.error("AI translate error for text[:%d]: %s", min(50, len(text)), e)
             results.append(text)  # 失败时保留原文
