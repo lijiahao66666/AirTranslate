@@ -1,13 +1,17 @@
 import 'package:flutter/material.dart';
 import 'services/api_service.dart';
+import 'services/auth_service.dart';
 import 'theme/app_theme.dart';
 import 'pages/home_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await ApiService().init();
-  // 触发初始积分赠送（首次安装）
-  try { await ApiService().initBalance(); } catch (_) {}
+  await AuthService.init();
+  // 登录用户初始化积分（绑定到 userId）
+  if (AuthService.isLoggedIn) {
+    try { await ApiService().initBalance(); } catch (_) {}
+  }
   runApp(const AirTranslateApp());
 }
 

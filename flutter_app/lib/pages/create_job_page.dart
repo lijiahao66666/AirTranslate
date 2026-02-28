@@ -3,8 +3,10 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
 import '../services/epub_char_counter.dart';
 import '../widgets/engine_selector.dart';
+import 'login_page.dart';
 
 class CreateJobPage extends StatefulWidget {
   const CreateJobPage({super.key});
@@ -106,7 +108,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
       final bytes = file.bytes;
       if (bytes != null) {
         final count = EpubCharCounter.countChars(bytes);
-        final cover = EpubCharCounter.extractCoverBase64(bytes);
+        final cover = await EpubCharCounter.extractCoverBase64(bytes);
         if (mounted) {
           setState(() {
             _charCount = count.clamp(100, 10000000);
@@ -144,6 +146,12 @@ class _CreateJobPageState extends State<CreateJobPage> {
       return;
     }
 
+    // AI 翻译需要登录（消耗积分）
+    if (_engineType == 'AI' && !AuthService.isLoggedIn) {
+      final loggedIn = await LoginPage.show(context);
+      if (!loggedIn) return;
+    }
+
     setState(() => _submitting = true);
     try {
       // 1. 创建任务
@@ -173,15 +181,14 @@ class _CreateJobPageState extends State<CreateJobPage> {
 
       // 4. 标记上传完成（进入待启动）
       final jobId = result['jobId'] as String;
+      await _api.markUploaded(jobId);
+
+      // 5. 保存封面到本地（markUploaded 之后，确保 job 已在服务端列表中）
       if (_localCoverImage != null && _localCoverImage!.isNotEmpty) {
         await _api.saveLocalCover(jobId, _localCoverImage!);
       }
-      await _api.markUploaded(jobId);
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('提交成功，请回到列表点击“启动”开始翻译'), behavior: SnackBarBehavior.floating),
-        );
         Navigator.pop(context, true);
       }
     } on ApiException catch (e) {

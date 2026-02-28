@@ -401,15 +401,12 @@ def translate_ai_chapter(
     if max_output_tokens < min_output_tokens:
         max_output_tokens = min_output_tokens
 
-    separator = "\n\n"
-
     for ci, chunk in enumerate(chunks):
         chunk_texts = [t for _, t in chunk]
-        combined = separator.join(chunk_texts)
-        total_chars = len(combined)
+        total_chars = sum(len(t) for t in chunk_texts)
 
         seg_start = time.time()
-        prompt = _build_chapter_prompt(combined, src_lang, tgt_lang, context, glossary, separator)
+        prompt = _build_chapter_prompt(chunk_texts, src_lang, tgt_lang, context, glossary)
         max_new = min(max(total_chars * 4, min_output_tokens), max_output_tokens)
 
         payload = {
@@ -440,22 +437,31 @@ def translate_ai_chapter(
             log.info("[AI-Chapter] Chunk %d/%d: done in %.1fs, in=%s out=%s tokens",
                      ci + 1, len(chunks), elapsed, in_tok, out_tok)
 
-            # 拆分翻译结果回各段落
-            translated_parts = raw_result.split(separator)
-
-            # 对齐：如果拆分数量不匹配，尝试用单换行分割
-            if len(translated_parts) != len(chunk_texts):
-                translated_parts = raw_result.split("\n")
-                translated_parts = [p.strip() for p in translated_parts if p.strip()]
-
+            # 按编号标记 [1] [2] ... 解析翻译结果
+            translated_map = _parse_numbered_output(raw_result, len(chunk_texts))
+            matched = 0
             for j, (orig_idx, _) in enumerate(chunk):
-                if j < len(translated_parts) and translated_parts[j].strip():
-                    result = translated_parts[j].strip()
+                para_num = j + 1
+                if para_num in translated_map and translated_map[para_num].strip():
+                    result = translated_map[para_num].strip()
                     # 去掉模型可能输出的注释
                     note_idx = result.find("（注")
                     if note_idx != -1:
                         result = result[:note_idx].strip()
                     results[orig_idx] = result
+                    matched += 1
+
+            log.info("[AI-Chapter] Chunk %d/%d: matched %d/%d paragraphs",
+                     ci + 1, len(chunks), matched, len(chunk_texts))
+
+            # 如果编号解析匹配率太低 (<50%), 回退到逐段翻译
+            if matched < len(chunk_texts) * 0.5:
+                log.warning("[AI-Chapter] Chunk %d/%d: low match rate (%d/%d), falling back to per-paragraph",
+                            ci + 1, len(chunks), matched, len(chunk_texts))
+                fallback = translate_ai(chunk_texts, src_lang, tgt_lang, context, glossary)
+                for j, (orig_idx, _) in enumerate(chunk):
+                    if j < len(fallback) and fallback[j].strip():
+                        results[orig_idx] = fallback[j]
 
         except Exception as e:
             elapsed = time.time() - seg_start
@@ -467,15 +473,48 @@ def translate_ai_chapter(
     return results
 
 
+import re as _re
+
+
+def _parse_numbered_output(raw: str, expected_count: int) -> dict[int, str]:
+    """解析模型按编号输出的翻译结果。
+
+    支持格式: [1] 翻译文本... [2] 翻译文本...
+    返回 {段落编号: 翻译文本}
+    """
+    result: dict[int, str] = {}
+    # 匹配 [数字] 标记
+    pattern = _re.compile(r'\[(\d+)\]')
+    matches = list(pattern.finditer(raw))
+
+    if not matches:
+        # 没有编号标记，尝试按双换行分割作为 fallback
+        parts = raw.split("\n\n")
+        parts = [p.strip() for p in parts if p.strip()]
+        for i, p in enumerate(parts):
+            if i < expected_count:
+                result[i + 1] = p
+        return result
+
+    for mi, m in enumerate(matches):
+        num = int(m.group(1))
+        start = m.end()
+        end = matches[mi + 1].start() if mi + 1 < len(matches) else len(raw)
+        text = raw[start:end].strip()
+        if num >= 1 and num <= expected_count:
+            result[num] = text
+
+    return result
+
+
 def _build_chapter_prompt(
-    combined_text: str,
+    texts: list[str],
     src_lang: str,
     tgt_lang: str,
     context: Optional[str] = None,
     glossary: Optional[dict] = None,
-    separator: str = "\n\n",
 ) -> str:
-    """构建章节级翻译 prompt，要求模型保持段落分隔 (遵循 README 模板)"""
+    """构建章节级翻译 prompt，使用编号标记确保段落 1:1 对应 (遵循 README 模板)"""
     parts = []
 
     # 术语表
@@ -490,30 +529,33 @@ def _build_chapter_prompt(
         if is_cn:
             instruction = (
                 f"参考上面的信息，把下面的文本翻译成{tgt_lang}，注意不需要翻译上文，也不要额外解释。"
-                f"文本由多个段落组成，段落之间用空行分隔，请保持相同的段落分隔格式："
+                f"文本由{len(texts)}个编号段落组成，请逐段翻译，每段翻译前保留对应的编号标记如[1] [2]等："
             )
         else:
             instruction = (
                 f"Based on the context above, translate the following text into {tgt_lang}. "
                 f"Do not translate the context. "
-                f"The text consists of multiple paragraphs separated by blank lines. "
-                f"Keep the same paragraph separation and output only the translation."
+                f"The text has {len(texts)} numbered paragraphs. "
+                f"Translate each paragraph and keep the number markers like [1] [2] etc."
             )
     else:
         if is_cn:
             instruction = (
                 f"将以下文本翻译为{tgt_lang}。"
-                f"文本由多个段落组成，段落之间用空行分隔。"
-                f"请保持相同的段落分隔格式，逐段翻译，只输出翻译结果，不要额外解释："
+                f"文本由{len(texts)}个编号段落组成。"
+                f"请逐段翻译，每段翻译前保留对应的编号标记如[1] [2]等，只输出翻译结果，不要额外解释："
             )
         else:
             instruction = (
                 f"Translate the following text into {tgt_lang}. "
-                f"The text consists of multiple paragraphs separated by blank lines. "
-                f"Keep the same paragraph separation, translate each paragraph, "
+                f"The text has {len(texts)} numbered paragraphs. "
+                f"Translate each paragraph, keep the number markers like [1] [2] etc, "
                 f"and output only the translation without additional explanation."
             )
 
     parts.append(instruction)
-    parts.append(combined_text)
+
+    # 用编号标记每个段落
+    numbered = "\n\n".join(f"[{i+1}] {t}" for i, t in enumerate(texts))
+    parts.append(numbered)
     return "\n\n".join(parts)

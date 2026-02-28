@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 import '../models/job.dart';
+import 'auth_service.dart';
 
 class ApiService {
   static const _prefKey = 'server_base_url';
@@ -116,6 +117,7 @@ class ApiService {
   }
 
   /// 读取本地缓存任务（离线/优先展示）
+  /// 缓存中不含 coverImage，需要从 cover map 合并
   Future<List<Job>> getCachedJobs() async {
     final raw = await _loadJobsRaw();
     if (raw == null || raw.isEmpty) return [];
@@ -131,7 +133,12 @@ class ApiService {
   }
 
   Future<void> saveCachedJobs(List<Job> jobs) async {
-    final data = jobs.map((e) => e.toJson()).toList();
+    // 缓存时剥离 coverImage，避免 Web localStorage 超限（封面单独存在 cover map 中）
+    final data = jobs.map((e) {
+      final json = e.toJson();
+      json.remove('coverImage');
+      return json;
+    }).toList();
     final raw = jsonEncode(data);
     if (kIsWeb) {
       final prefs = await SharedPreferences.getInstance();
@@ -156,11 +163,12 @@ class ApiService {
     map[jobId] = dataUri;
     await _saveCoverMap(map);
 
-    final cached = await getCachedJobs();
-    final updated = cached
-        .map((j) => j.jobId == jobId ? j.copyWith(coverImage: dataUri) : j)
-        .toList();
-    await saveCachedJobs(updated);
+    // 刷新缓存：从服务端拉取最新列表并合并封面
+    try {
+      await listJobs();
+    } catch (_) {
+      // 服务端不可达时，cover map 已保存，下次 listJobs 会合并
+    }
   }
 
   Future<void> removeLocalJobData(String jobId) async {
@@ -323,9 +331,18 @@ class ApiService {
   // HTTP helpers
   // -----------------------------------------------------------------------
 
+  Map<String, String> _buildHeaders() {
+    final headers = <String, String>{'Content-Type': 'application/json'};
+    if (AuthService.isLoggedIn && AuthService.token.isNotEmpty) {
+      headers['X-Auth-Token'] = AuthService.token;
+    }
+    headers['X-Device-Id'] = deviceId;
+    return headers;
+  }
+
   Future<Map<String, dynamic>> _get(String path, Map<String, String> params) async {
     final uri = Uri.parse('$_baseUrl$path').replace(queryParameters: params);
-    final resp = await http.get(uri).timeout(const Duration(seconds: 30));
+    final resp = await http.get(uri, headers: _buildHeaders()).timeout(const Duration(seconds: 30));
     return _handleResponse(resp);
   }
 
@@ -333,7 +350,7 @@ class ApiService {
     final uri = Uri.parse('$_baseUrl$path');
     final resp = await http.post(
       uri,
-      headers: {'Content-Type': 'application/json'},
+      headers: _buildHeaders(),
       body: jsonEncode(body),
     ).timeout(const Duration(seconds: 30));
     return _handleResponse(resp);

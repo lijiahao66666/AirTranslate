@@ -1,12 +1,14 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:archive/archive.dart';
+import 'package:flutter/foundation.dart';
 
 /// EPUB 解析工具：字数统计 + 封面提取
 class EpubCharCounter {
 
   /// 从 EPUB 中提取封面图片，返回 base64 data URI，失败返回 null
-  static String? extractCoverBase64(Uint8List epubBytes) {
+  static Future<String?> extractCoverBase64(Uint8List epubBytes) async {
     try {
       final archive = ZipDecoder().decodeBytes(epubBytes);
 
@@ -59,12 +61,39 @@ class EpubCharCounter {
       if (coverFile == null) return null;
 
       final bytes = coverFile.content as List<int>;
-      // 允许更大的封面，避免大多数 EPUB 回落为默认图
-      if (bytes.isEmpty || bytes.length > 400000) return null;
+      if (bytes.isEmpty || bytes.length > 5000000) return null;
 
+      // 压缩为缩略图后返回 data URI，节省 localStorage 空间
+      final raw = Uint8List.fromList(bytes);
+      final thumbnail = await _compressToThumbnail(raw);
+      if (thumbnail != null) {
+        final b64 = base64Encode(thumbnail);
+        return 'data:image/png;base64,$b64';
+      }
+
+      // 压缩失败则直接用原图
       final mime = _imageMime(coverFile.name);
-      final b64 = base64Encode(Uint8List.fromList(bytes));
+      final b64 = base64Encode(raw);
       return 'data:$mime;base64,$b64';
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 使用 dart:ui 将图片压缩为缩略图 (最大 120x160 px, PNG)
+  static Future<Uint8List?> _compressToThumbnail(Uint8List rawBytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(
+        rawBytes,
+        targetWidth: 120,
+        targetHeight: 160,
+      );
+      final frame = await codec.getNextFrame();
+      final image = frame.image;
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      image.dispose();
+      if (byteData == null) return null;
+      return byteData.buffer.asUint8List();
     } catch (_) {
       return null;
     }

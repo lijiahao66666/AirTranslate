@@ -5,10 +5,12 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/job.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/job_card.dart';
 import '../widgets/wallet_sheet.dart';
 import 'create_job_page.dart';
+import 'login_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -30,6 +32,12 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _loadData();
     _pollTimer = Timer.periodic(const Duration(seconds: 8), (_) => _refreshJobs());
+    AuthService.onAuthStateChanged = () {
+      if (mounted) {
+        setState(() {});
+        _loadData();
+      }
+    };
   }
 
   Future<void> _startJob(Job job) async {
@@ -184,6 +192,69 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  void _showAccountSheet() {
+    if (!AuthService.isLoggedIn) {
+      LoginPage.show(context);
+      return;
+    }
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Container(
+        decoration: BoxDecoration(
+          color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Center(
+              child: Container(
+                width: 36, height: 4,
+                decoration: BoxDecoration(
+                  color: isDark ? Colors.white24 : Colors.black12,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            CircleAvatar(
+              radius: 32,
+              backgroundColor: const Color(0xFF4FC3F7).withValues(alpha: 0.15),
+              child: const Icon(Icons.person, size: 36, color: Color(0xFF4FC3F7)),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              AuthService.phone,
+              style: TextStyle(
+                fontSize: 18, fontWeight: FontWeight.w600,
+                color: isDark ? Colors.white : Colors.black87,
+              ),
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              width: double.infinity, height: 44,
+              child: OutlinedButton(
+                onPressed: () async {
+                  Navigator.pop(context);
+                  await AuthService.logout();
+                },
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.redAccent,
+                  side: const BorderSide(color: Colors.redAccent),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text('退出登录', style: TextStyle(fontSize: 15)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -236,12 +307,34 @@ class _HomePageState extends State<HomePage> {
                 ],
               ),
               actions: [
-                // 积分按钮
+                // 积分按钮（仅登录后显示余额，未登录不显示）
+                if (AuthService.isLoggedIn)
+                  GestureDetector(
+                    onTap: () => WalletSheet.show(context, _balance, () => _refreshJobs()),
+                    child: Container(
+                      margin: const EdgeInsets.only(right: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.2),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text('🪙 ', style: TextStyle(fontSize: 13)),
+                          Text(fmt.format(_balance), style: const TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13,
+                          )),
+                        ],
+                      ),
+                    ),
+                  ),
+                // 登录/用户按钮
                 GestureDetector(
-                  onTap: () => WalletSheet.show(context, _balance, () => _refreshJobs()),
+                  onTap: () => _showAccountSheet(),
                   child: Container(
                     margin: const EdgeInsets.only(right: 16),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                     decoration: BoxDecoration(
                       color: Colors.white.withValues(alpha: 0.2),
                       borderRadius: BorderRadius.circular(20),
@@ -249,10 +342,17 @@ class _HomePageState extends State<HomePage> {
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Text('🪙 ', style: TextStyle(fontSize: 13)),
-                        Text(fmt.format(_balance), style: const TextStyle(
-                          color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13,
-                        )),
+                        Icon(
+                          AuthService.isLoggedIn ? Icons.person : Icons.person_outline,
+                          color: Colors.white, size: 16,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          AuthService.isLoggedIn ? AuthService.phone : '登录',
+                          style: const TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13,
+                          ),
+                        ),
                       ],
                     ),
                   ),

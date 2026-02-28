@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const https = require('https');
 
 // ---------------------------------------------------------------------------
 // 加载 .env 文件 (零依赖)
@@ -191,6 +192,278 @@ function verifyWorkerKey(req) {
   const key = (process.env.WORKER_API_KEY || '').trim();
   if (!key) return true; // 未配置则跳过
   const header = (req.headers['x-worker-key'] || '').trim();
+  return header === key;
+}
+
+// ---------------------------------------------------------------------------
+// Tencent Cloud v3 签名 (用于短信 API)
+// ---------------------------------------------------------------------------
+
+function sha256Hex(msg) {
+  return crypto.createHash('sha256').update(msg, 'utf8').digest('hex');
+}
+
+function hmacSha256(key, msg, encoding) {
+  return crypto.createHmac('sha256', key).update(msg, 'utf8').digest(encoding);
+}
+
+function formatDateUTC(tsSeconds) {
+  const d = new Date(tsSeconds * 1000);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function buildTc3Auth({ secretId, secretKey, service, host, action, version, region, timestampSeconds, payloadJson }) {
+  const algorithm = 'TC3-HMAC-SHA256';
+  const date = formatDateUTC(timestampSeconds);
+  const canonicalUri = '/';
+  const canonicalQueryString = '';
+  const canonicalHeaders = `content-type:application/json; charset=utf-8\nhost:${host}\n`;
+  const signedHeaders = 'content-type;host';
+  const hashedRequestPayload = sha256Hex(payloadJson);
+  const canonicalRequest = ['POST', canonicalUri, canonicalQueryString, canonicalHeaders, signedHeaders, hashedRequestPayload].join('\n');
+  const credentialScope = `${date}/${service}/tc3_request`;
+  const stringToSign = [algorithm, String(timestampSeconds), credentialScope, sha256Hex(canonicalRequest)].join('\n');
+  const secretDate = hmacSha256(`TC3${secretKey}`, date);
+  const secretService = hmacSha256(secretDate, service);
+  const secretSigning = hmacSha256(secretService, 'tc3_request');
+  const signature = hmacSha256(secretSigning, stringToSign, 'hex');
+  const authorization = `${algorithm} Credential=${secretId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  const headers = {
+    'Content-Type': 'application/json; charset=utf-8',
+    Host: host,
+    'X-TC-Action': action,
+    'X-TC-Version': version,
+    'X-TC-Timestamp': String(timestampSeconds),
+    Authorization: authorization,
+  };
+  if (region && String(region).trim()) headers['X-TC-Region'] = String(region).trim();
+  return headers;
+}
+
+// ---------------------------------------------------------------------------
+// 用户认证存储目录
+// ---------------------------------------------------------------------------
+
+const AUTH_DIRS = {
+  users:  path.join(DATA_DIR, 'users'),
+  sms:    path.join(DATA_DIR, 'sms'),
+  tokens: path.join(DATA_DIR, 'tokens'),
+};
+for (const dir of Object.values(AUTH_DIRS)) {
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+// ---------------------------------------------------------------------------
+// 短信验证码
+// ---------------------------------------------------------------------------
+
+function _smsFile(phone) {
+  const safe = String(phone).replace(/[^0-9]/g, '');
+  return path.join(AUTH_DIRS.sms, `${safe}.json`);
+}
+
+function _generateCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+async function sendSmsCode(phone) {
+  const safe = String(phone).replace(/[^0-9]/g, '');
+  if (safe.length !== 11) return { error: 'InvalidPhone' };
+
+  const file = _smsFile(safe);
+  let smsData = null;
+  try { if (fs.existsSync(file)) smsData = JSON.parse(fs.readFileSync(file, 'utf-8')); } catch (_) {}
+
+  const now = Date.now();
+  const today = new Date().toISOString().substring(0, 10);
+
+  if (smsData) {
+    if (smsData.lastSentAt && (now - smsData.lastSentAt) < 60000) {
+      return { error: 'TooFrequent', message: '发送太频繁，请60秒后重试' };
+    }
+    if (smsData.dailyDate === today && (smsData.dailyCount || 0) >= 10) {
+      return { error: 'DailyLimit', message: '今日验证码发送次数已达上限' };
+    }
+  }
+
+  const code = _generateCode();
+  const expireAt = now + 5 * 60 * 1000;
+
+  const smsAppId = (process.env.SMS_APP_ID || '').trim();
+  const smsSign = (process.env.SMS_SIGN || '').trim();
+  const smsTemplateId = (process.env.SMS_TEMPLATE_ID || '').trim();
+  const secretId = (process.env.TENCENT_SECRET_ID || '').trim();
+  const secretKey = (process.env.TENCENT_SECRET_KEY || '').trim();
+
+  if (!smsAppId || !smsSign || !smsTemplateId || !secretId || !secretKey) {
+    console.error('[SMS] Missing SMS config env vars');
+    return { error: 'SmsConfigError', message: '短信服务未配置' };
+  }
+
+  const smsPayload = {
+    SmsSdkAppId: smsAppId,
+    SignName: smsSign,
+    TemplateId: smsTemplateId,
+    TemplateParamSet: [code, '5'],
+    PhoneNumberSet: [`+86${safe}`],
+  };
+  const smsPayloadJson = JSON.stringify(smsPayload);
+  const ts = Math.floor(now / 1000);
+  const smsHeaders = buildTc3Auth({
+    secretId, secretKey,
+    service: 'sms', host: 'sms.tencentcloudapi.com',
+    action: 'SendSms', version: '2021-01-11',
+    region: 'ap-guangzhou', timestampSeconds: ts,
+    payloadJson: smsPayloadJson,
+  });
+
+  try {
+    const smsResp = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'sms.tencentcloudapi.com',
+        method: 'POST', path: '/',
+        headers: smsHeaders,
+      }, (res) => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => { try { resolve(JSON.parse(data)); } catch (e) { reject(e); } });
+      });
+      req.on('error', reject);
+      req.write(smsPayloadJson);
+      req.end();
+    });
+
+    const resp = smsResp.Response || smsResp;
+    if (resp.Error) {
+      console.error('[SMS] API error:', resp.Error);
+      return { error: 'SmsSendFailed', message: resp.Error.Message || '短信发送失败' };
+    }
+    const sendStatus = resp.SendStatusSet && resp.SendStatusSet[0];
+    if (sendStatus && sendStatus.Code !== 'Ok') {
+      console.error('[SMS] Send status:', sendStatus);
+      return { error: 'SmsSendFailed', message: sendStatus.Message || '短信发送失败' };
+    }
+  } catch (e) {
+    console.error('[SMS] Request error:', e.message);
+    return { error: 'SmsSendFailed', message: '短信发送失败' };
+  }
+
+  const dailyCount = (smsData && smsData.dailyDate === today) ? (smsData.dailyCount || 0) + 1 : 1;
+  fs.writeFileSync(file, JSON.stringify({ code, expireAt, lastSentAt: now, dailyDate: today, dailyCount }, null, 2), 'utf-8');
+  console.log(`[SMS] Sent code to ${safe.substring(0, 3)}****${safe.substring(7)}`);
+  return { success: true };
+}
+
+function verifySmsCode(phone, code) {
+  const safe = String(phone).replace(/[^0-9]/g, '');
+  const file = _smsFile(safe);
+  if (!fs.existsSync(file)) return false;
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (Date.now() > data.expireAt) return false;
+    if (data.code !== String(code).trim()) return false;
+    fs.unlinkSync(file);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 用户管理
+// ---------------------------------------------------------------------------
+
+function _userFile(phone) {
+  const safe = String(phone).replace(/[^0-9]/g, '');
+  return path.join(AUTH_DIRS.users, `${safe}.json`);
+}
+
+function _tokenFile(token) {
+  const safe = String(token).replace(/[^a-zA-Z0-9_\-]/g, '');
+  return path.join(AUTH_DIRS.tokens, `${safe}.json`);
+}
+
+function _generateToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function findOrCreateUser(phone) {
+  const safe = String(phone).replace(/[^0-9]/g, '');
+  const file = _userFile(safe);
+  const now = new Date().toISOString();
+
+  if (fs.existsSync(file)) {
+    const user = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (user.token) {
+      const oldTf = _tokenFile(user.token);
+      try { if (fs.existsSync(oldTf)) fs.unlinkSync(oldTf); } catch (_) {}
+    }
+    const token = _generateToken();
+    user.token = token;
+    user.lastLoginAt = now;
+    user.loginCount = (user.loginCount || 0) + 1;
+    fs.writeFileSync(file, JSON.stringify(user, null, 2), 'utf-8');
+    fs.writeFileSync(_tokenFile(token), JSON.stringify({ userId: user.userId, phone: safe }), 'utf-8');
+    return user;
+  }
+
+  const userId = 'u_' + crypto.randomBytes(8).toString('hex');
+  const token = _generateToken();
+  const user = { userId, phone: safe, token, createdAt: now, lastLoginAt: now, loginCount: 1, devices: [] };
+  fs.writeFileSync(file, JSON.stringify(user, null, 2), 'utf-8');
+  fs.writeFileSync(_tokenFile(token), JSON.stringify({ userId, phone: safe }), 'utf-8');
+  console.log(`[Auth] New user: ${userId} phone=${safe.substring(0, 3)}****${safe.substring(7)}`);
+  return user;
+}
+
+function getUserByToken(token) {
+  if (!token) return null;
+  const tf = _tokenFile(token);
+  if (!fs.existsSync(tf)) return null;
+  try {
+    const mapping = JSON.parse(fs.readFileSync(tf, 'utf-8'));
+    const uf = _userFile(mapping.phone);
+    if (!fs.existsSync(uf)) return null;
+    return JSON.parse(fs.readFileSync(uf, 'utf-8'));
+  } catch (_) {
+    return null;
+  }
+}
+
+function revokeToken(token) {
+  if (!token) return;
+  const tf = _tokenFile(token);
+  try { if (fs.existsSync(tf)) fs.unlinkSync(tf); } catch (_) {}
+}
+
+/** 从请求中提取 userId: 优先 token → fallback deviceId header */
+function getUserIdFromReq(req) {
+  const token = String(req.headers['x-auth-token'] || '').trim();
+  if (token) {
+    const user = getUserByToken(token);
+    if (user) return user.userId;
+  }
+  return null;
+}
+
+/** 获取请求中的有效身份: userId (from token) 或 deviceId (from header/body) */
+function getEffectiveId(req, body) {
+  const userId = getUserIdFromReq(req);
+  if (userId) return userId;
+  return String(body?.deviceId || req.headers['x-device-id'] || '').trim();
+}
+
+// ---------------------------------------------------------------------------
+// API Key 验证 (App 请求)
+// ---------------------------------------------------------------------------
+
+function verifyApiKey(req) {
+  const key = (process.env.API_KEY || '').trim();
+  if (!key) return true;
+  const header = (req.headers['x-api-key'] || '').trim();
   return header === key;
 }
 
@@ -392,13 +665,14 @@ function listQueue(limit = 5) {
 // API: POST /jobs/create
 // ---------------------------------------------------------------------------
 
-function handleCreateJob(res, body) {
+function handleCreateJob(req, res, body) {
   const { bucket, region } = getCosConfig();
   if (!bucket || !region) return sendJson(res, 500, { error: 'ServerMisconfiguration', message: 'COS not configured' });
 
   const engineType = normalizeEngineType(body.engineType || body.engine);
   const output = normalizeOutput(body.output);
-  const deviceId = String(body.deviceId || body.device_id || '').trim();
+  const rawDeviceId = String(body.deviceId || body.device_id || '').trim();
+  const effectiveId = getEffectiveId(req, body);
   const sourceLang = String(body.sourceLang || body.source_lang || 'auto').trim() || 'auto';
   const targetLang = String(body.targetLang || body.target_lang || '').trim();
   const sourceFileName = String(body.sourceFileName || body.source_file_name || '').trim();
@@ -409,18 +683,18 @@ function handleCreateJob(res, body) {
 
   if (!targetLang) return sendJson(res, 400, { error: 'BadRequest', message: 'targetLang required' });
   if (!sourceFileName) return sendJson(res, 400, { error: 'BadRequest', message: 'sourceFileName required' });
-  if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
+  if (!effectiveId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
 
-  // AI翻译: 预扣积分
+  // AI翻译: 预扣积分 (绑定到 effectiveId: 登录用 userId, 未登录用 deviceId)
   let pointsDeducted = 0;
   if (engineType === 'AI' && charCount > 0) {
     const cfg = loadConfig();
     pointsDeducted = Math.ceil(charCount / cfg.billing_unit_chars) * cfg.billing_unit_cost;
-    const balance = readPointsBalance(deviceId);
+    const balance = readPointsBalance(effectiveId);
     if (balance < pointsDeducted) {
       return sendJson(res, 409, { error: 'POINTS_INSUFFICIENT', need: pointsDeducted, balance });
     }
-    writePointsBalance(deviceId, balance - pointsDeducted);
+    writePointsBalance(effectiveId, balance - pointsDeducted);
   }
 
   const jobId = crypto.randomBytes(16).toString('hex');
@@ -428,8 +702,9 @@ function handleCreateJob(res, body) {
   const { presignSeconds } = getCosConfig();
 
   const spec = {
-    jobId, engineType, output, deviceId, sourceLang, targetLang,
-    sourceFileName, charCount, useContext, useGlossary, translateMode,
+    jobId, engineType, output, deviceId: rawDeviceId, ownerId: effectiveId,
+    sourceLang, targetLang, sourceFileName, charCount,
+    useContext, useGlossary, translateMode,
     pointsDeducted, createdAt: nowIso,
   };
   const progress = { jobId, state: 'CREATED', percent: 0, engineType, output, updatedAt: nowIso };
@@ -518,12 +793,15 @@ function handleGetProgress(res, jobId) {
   // 失败时自动退还积分
   if (progress.state === 'FAILED' && !progress._refunded) {
     const job = readJobSpec(jobId);
-    if (job && job.pointsDeducted > 0 && job.deviceId) {
-      const cur = readPointsBalance(job.deviceId);
-      writePointsBalance(job.deviceId, cur + job.pointsDeducted);
-      progress._refunded = true;
-      progress.refundedPoints = job.pointsDeducted;
-      writeProgress(jobId, progress);
+    if (job && job.pointsDeducted > 0) {
+      const refundTo = job.ownerId || job.deviceId;
+      if (refundTo) {
+        const cur = readPointsBalance(refundTo);
+        writePointsBalance(refundTo, cur + job.pointsDeducted);
+        progress._refunded = true;
+        progress.refundedPoints = job.pointsDeducted;
+        writeProgress(jobId, progress);
+      }
     }
   }
 
@@ -562,17 +840,22 @@ function handleGetDownloadUrl(res, jobId, output) {
 // API: GET /jobs/list
 // ---------------------------------------------------------------------------
 
-function handleListJobs(res, deviceId) {
-  if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
+function handleListJobs(req, res, deviceId) {
+  // 优先用登录 userId, 同时也匹配 deviceId
+  const userId = getUserIdFromReq(req);
+  if (!deviceId && !userId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
 
   const jobs = [];
   try {
     const dirs = fs.readdirSync(DIRS.jobs);
     for (const jobId of dirs) {
       const job = readJobSpec(jobId);
-      if (job && job.deviceId === deviceId) {
+      if (!job) continue;
+      // 匹配: ownerId == userId 或 deviceId == deviceId 或旧任务 deviceId == deviceId
+      const match = (userId && (job.ownerId === userId || job.deviceId === userId))
+                 || (deviceId && (job.deviceId === deviceId || job.ownerId === deviceId));
+      if (match) {
         const progress = readProgress(jobId) || {};
-        // 列表接口不返回 coverImage（体积过大会导致超时）
         const { coverImage: _, ...jobWithoutCover } = job;
         jobs.push({ ...jobWithoutCover, progress });
       }
@@ -604,11 +887,12 @@ function handleDeleteJob(res, body) {
   // 退还积分（仅未开始翻译的 AI 任务：CREATED / READY / UPLOADED）
   let refunded = 0;
   const canRefund = (state === 'CREATED' || state === 'READY' || state === 'UPLOADED');
-  if (canRefund && spec.pointsDeducted > 0 && spec.deviceId && !progress._refunded) {
-    const cur = readPointsBalance(spec.deviceId);
-    writePointsBalance(spec.deviceId, cur + spec.pointsDeducted);
+  const refundTo = spec.ownerId || spec.deviceId;
+  if (canRefund && spec.pointsDeducted > 0 && refundTo && !progress._refunded) {
+    const cur = readPointsBalance(refundTo);
+    writePointsBalance(refundTo, cur + spec.pointsDeducted);
     refunded = spec.pointsDeducted;
-    console.log(`[delete] refund ${refunded} to ${spec.deviceId} for job ${jobId}`);
+    console.log(`[delete] refund ${refunded} to ${refundTo} for job ${jobId}`);
   }
 
   // 删除任务目录
@@ -622,31 +906,32 @@ function handleDeleteJob(res, body) {
 // API: GET /billing/balance
 // ---------------------------------------------------------------------------
 
-function handleBalance(res, deviceId) {
-  if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
-  const balance = readPointsBalance(deviceId);
-  return sendJson(res, 200, { deviceId, balance });
+function handleBalance(req, res, deviceId) {
+  const id = getUserIdFromReq(req) || deviceId;
+  if (!id) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
+  const balance = readPointsBalance(id);
+  return sendJson(res, 200, { deviceId: id, balance });
 }
 
 // ---------------------------------------------------------------------------
 // API: POST /billing/init  — 初始化积分（首次赠送）+ 返回余额
 // ---------------------------------------------------------------------------
 
-function handleBillingInit(res, body) {
-  const deviceId = String(body.deviceId || '').trim();
-  if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
-  const balance = ensureInitialGrant(deviceId);
-  return sendJson(res, 200, { deviceId, balance });
+function handleBillingInit(req, res, body) {
+  const id = getEffectiveId(req, body);
+  if (!id) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
+  const balance = ensureInitialGrant(id);
+  return sendJson(res, 200, { deviceId: id, balance });
 }
 
 // ---------------------------------------------------------------------------
 // API: POST /checkin  — 每日签到
 // ---------------------------------------------------------------------------
 
-function handleCheckin(res, body) {
-  const deviceId = String(body.deviceId || '').trim();
-  if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
-  const result = doCheckin(deviceId);
+function handleCheckin(req, res, body) {
+  const id = getEffectiveId(req, body);
+  if (!id) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
+  const result = doCheckin(id);
   return sendJson(res, 200, result);
 }
 
@@ -654,10 +939,10 @@ function handleCheckin(res, body) {
 // API: POST /checkin/status  — 查询签到状态
 // ---------------------------------------------------------------------------
 
-function handleCheckinStatus(res, body) {
-  const deviceId = String(body.deviceId || '').trim();
-  if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
-  const data = _readPointsData(deviceId);
+function handleCheckinStatus(req, res, body) {
+  const id = getEffectiveId(req, body);
+  if (!id) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
+  const data = _readPointsData(id);
   const today = new Date().toISOString().substring(0, 10);
   const done = data.lastCheckinDate === today;
   const streak = Number(data.checkinStreak || 0);
@@ -852,7 +1137,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,accept,x-worker-key,x-device-id');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,accept,x-worker-key,x-device-id,x-api-key,x-auth-token');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     res.end();
     return;
@@ -872,18 +1157,81 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    // --- Auth ---
+    if (req.method === 'POST' && pathname === '/auth/sms/send') {
+      if (!verifyApiKey(req)) return sendJson(res, 401, { error: 'Unauthorized' });
+      const phone = String(body.phone || '').trim();
+      if (!phone || phone.replace(/[^0-9]/g, '').length !== 11) {
+        return sendJson(res, 400, { error: 'InvalidPhone', message: '请输入正确的手机号' });
+      }
+      const result = await sendSmsCode(phone);
+      if (result.error) return sendJson(res, 429, result);
+      return sendJson(res, 200, { success: true });
+    }
+
+    if (req.method === 'POST' && pathname === '/auth/sms/verify') {
+      if (!verifyApiKey(req)) return sendJson(res, 401, { error: 'Unauthorized' });
+      const phone = String(body.phone || '').trim();
+      const code = String(body.code || '').trim();
+      if (!phone || !code) return sendJson(res, 400, { error: 'MissingFields' });
+      if (!verifySmsCode(phone, code)) {
+        return sendJson(res, 400, { error: 'InvalidCode', message: '验证码错误或已过期' });
+      }
+      const isNew = !fs.existsSync(_userFile(phone.replace(/[^0-9]/g, '')));
+      const user = findOrCreateUser(phone);
+      if (isNew) ensureInitialGrant(user.userId);
+      // 迁移 deviceId 积分到 userId
+      const deviceId = String(req.headers['x-device-id'] || body.deviceId || '').trim();
+      if (deviceId && deviceId !== user.userId) {
+        const deviceBalance = readPointsBalance(deviceId);
+        const userBalance = readPointsBalance(user.userId);
+        if (deviceBalance > userBalance) {
+          writePointsBalance(user.userId, deviceBalance);
+          console.log(`[Auth] Merged points from device ${deviceId} to user ${user.userId}: ${deviceBalance}`);
+        }
+      }
+      if (deviceId && !user.devices.includes(deviceId)) {
+        user.devices.push(deviceId);
+        fs.writeFileSync(_userFile(phone.replace(/[^0-9]/g, '')), JSON.stringify(user, null, 2), 'utf-8');
+      }
+      const balance = readPointsBalance(user.userId);
+      return sendJson(res, 200, {
+        token: user.token, userId: user.userId,
+        phone: user.phone.substring(0, 3) + '****' + user.phone.substring(7),
+        balance, isNewUser: isNew,
+      });
+    }
+
+    if (req.method === 'POST' && pathname === '/auth/profile') {
+      if (!verifyApiKey(req)) return sendJson(res, 401, { error: 'Unauthorized' });
+      const user = getUserByToken(String(req.headers['x-auth-token'] || '').trim());
+      if (!user) return sendJson(res, 401, { error: 'NotLoggedIn', message: '未登录' });
+      const balance = readPointsBalance(user.userId);
+      return sendJson(res, 200, {
+        userId: user.userId,
+        phone: user.phone.substring(0, 3) + '****' + user.phone.substring(7),
+        balance, createdAt: user.createdAt, loginCount: user.loginCount,
+      });
+    }
+
+    if (req.method === 'POST' && pathname === '/auth/logout') {
+      const token = String(req.headers['x-auth-token'] || '').trim();
+      if (token) revokeToken(token);
+      return sendJson(res, 200, { success: true });
+    }
+
     // --- Jobs (App-facing) ---
-    if (req.method === 'POST' && pathname === '/jobs/create') return handleCreateJob(res, body);
+    if (req.method === 'POST' && pathname === '/jobs/create') return handleCreateJob(req, res, body);
     if (req.method === 'POST' && pathname === '/jobs/markUploaded') return handleMarkUploaded(res, body);
     if (req.method === 'POST' && pathname === '/jobs/start') return handleStartJob(res, body);
     if (req.method === 'GET' && pathname === '/jobs/progress') return handleGetProgress(res, String(url.searchParams.get('jobId') || '').trim());
     if (req.method === 'GET' && pathname === '/jobs/download') return handleGetDownloadUrl(res, String(url.searchParams.get('jobId') || '').trim(), url.searchParams.get('output'));
-    if (req.method === 'GET' && pathname === '/jobs/list') return handleListJobs(res, String(url.searchParams.get('deviceId') || '').trim());
+    if (req.method === 'GET' && pathname === '/jobs/list') return handleListJobs(req, res, String(url.searchParams.get('deviceId') || '').trim());
     if (req.method === 'POST' && pathname === '/jobs/delete') return handleDeleteJob(res, body);
 
     // --- Billing ---
-    if (req.method === 'POST' && pathname === '/billing/init') return handleBillingInit(res, body);
-    if (req.method === 'GET' && pathname === '/billing/balance') return handleBalance(res, String(url.searchParams.get('deviceId') || '').trim());
+    if (req.method === 'POST' && pathname === '/billing/init') return handleBillingInit(req, res, body);
+    if (req.method === 'GET' && pathname === '/billing/balance') return handleBalance(req, res, String(url.searchParams.get('deviceId') || '').trim());
 
     // --- Config ---
     if (req.method === 'GET' && pathname === '/config') {
@@ -891,8 +1239,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     // --- Checkin ---
-    if (req.method === 'POST' && pathname === '/checkin') return handleCheckin(res, body);
-    if (req.method === 'POST' && pathname === '/checkin/status') return handleCheckinStatus(res, body);
+    if (req.method === 'POST' && pathname === '/checkin') return handleCheckin(req, res, body);
+    if (req.method === 'POST' && pathname === '/checkin/status') return handleCheckinStatus(req, res, body);
 
     // --- Worker (internal) ---
     if (req.method === 'GET' && pathname === '/worker/poll') return handleWorkerPoll(req, res);
