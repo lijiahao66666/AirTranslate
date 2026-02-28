@@ -9,6 +9,7 @@ class Job {
   final int charCount;
   final bool useContext;
   final bool useGlossary;
+  final String translateMode; // "PARAGRAPH" or "CHAPTER"
   final int pointsDeducted;
   final String createdAt;
   final String? coverImage;
@@ -25,6 +26,7 @@ class Job {
     this.charCount = 0,
     this.useContext = false,
     this.useGlossary = false,
+    this.translateMode = 'PARAGRAPH',
     this.pointsDeducted = 0,
     required this.createdAt,
     this.coverImage,
@@ -44,10 +46,54 @@ class Job {
       charCount: (json['charCount'] ?? 0) is int ? json['charCount'] : int.tryParse('${json['charCount']}') ?? 0,
       useContext: json['useContext'] == true,
       useGlossary: json['useGlossary'] == true,
+      translateMode: json['translateMode'] ?? 'PARAGRAPH',
       pointsDeducted: (json['pointsDeducted'] ?? 0) is int ? json['pointsDeducted'] : int.tryParse('${json['pointsDeducted']}') ?? 0,
       createdAt: json['createdAt'] ?? '',
       coverImage: json['coverImage'],
       progress: progressJson != null ? JobProgress.fromJson(progressJson) : null,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'jobId': jobId,
+      'engineType': engineType,
+      'output': output,
+      'deviceId': deviceId,
+      'sourceLang': sourceLang,
+      'targetLang': targetLang,
+      'sourceFileName': sourceFileName,
+      'charCount': charCount,
+      'useContext': useContext,
+      'useGlossary': useGlossary,
+      'translateMode': translateMode,
+      'pointsDeducted': pointsDeducted,
+      'createdAt': createdAt,
+      'coverImage': coverImage,
+      'progress': progress?.toJson(),
+    };
+  }
+
+  Job copyWith({
+    String? coverImage,
+    JobProgress? progress,
+  }) {
+    return Job(
+      jobId: jobId,
+      engineType: engineType,
+      output: output,
+      deviceId: deviceId,
+      sourceLang: sourceLang,
+      targetLang: targetLang,
+      sourceFileName: sourceFileName,
+      charCount: charCount,
+      useContext: useContext,
+      useGlossary: useGlossary,
+      translateMode: translateMode,
+      pointsDeducted: pointsDeducted,
+      createdAt: createdAt,
+      coverImage: coverImage ?? this.coverImage,
+      progress: progress ?? this.progress,
     );
   }
 
@@ -106,13 +152,27 @@ class JobProgress {
     );
   }
 
+  Map<String, dynamic> toJson() {
+    return {
+      'state': state,
+      'percent': percent,
+      'engineType': engineType,
+      'output': output,
+      'chapterIndex': chapterIndex,
+      'chapterTotal': chapterTotal,
+      'refundedPoints': refundedPoints,
+      'error': error?.toJson(),
+    };
+  }
+
   bool get isDone => state == 'DONE';
   bool get isFailed => state == 'FAILED';
-  bool get isRunning => !isDone && !isFailed && state != 'CREATED';
+  bool get isRunning => !isDone && !isFailed && state != 'CREATED' && state != 'READY';
 
   String get stateLabel {
     switch (state) {
       case 'CREATED': return '已创建';
+      case 'READY': return '待启动';
       case 'UPLOADED': return '排队中';
       case 'PARSING': return '解析中';
       case 'TRANSLATING': return '翻译中';
@@ -136,5 +196,12 @@ class JobError {
       code: json['code'] ?? '',
       message: json['message'] ?? '',
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'code': code,
+      'message': message,
+    };
   }
 }

@@ -1,17 +1,22 @@
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite/sqflite.dart';
 import '../models/job.dart';
 
 class ApiService {
   static const _prefKey = 'server_base_url';
+  static const _jobsCachePrefix = 'jobs_cache_v1_';
+  static const _coversKey = 'jobs_local_covers_v1';
   // TODO: 备案通过后改为 https://translate-api.air-inc.top
   static const _defaultUrl = 'http://122.51.10.98:9001';
 
   String _baseUrl = _defaultUrl;
   String? _deviceId;
+  Database? _db;
 
   static final ApiService _instance = ApiService._();
   factory ApiService() => _instance;
@@ -46,7 +51,7 @@ class ApiService {
     int charCount = 0,
     bool useContext = false,
     bool useGlossary = false,
-    String? coverImage,
+    String translateMode = 'PARAGRAPH',
   }) async {
     final body = <String, dynamic>{
       'engineType': engineType,
@@ -58,8 +63,8 @@ class ApiService {
       'charCount': charCount,
       'useContext': useContext,
       'useGlossary': useGlossary,
+      'translateMode': translateMode,
     };
-    if (coverImage != null) body['coverImage'] = coverImage;
     final resp = await _post('/jobs/create', body);
     return resp;
   }
@@ -76,9 +81,14 @@ class ApiService {
     }
   }
 
-  /// 标记上传完成，加入队列
+  /// 标记上传完成（进入待启动状态）
   Future<void> markUploaded(String jobId) async {
     await _post('/jobs/markUploaded', {'jobId': jobId});
+  }
+
+  /// 手动启动任务（加入队列）
+  Future<void> startJob(String jobId) async {
+    await _post('/jobs/start', {'jobId': jobId});
   }
 
   /// 查询任务进度
@@ -99,12 +109,183 @@ class ApiService {
   Future<List<Job>> listJobs() async {
     final resp = await _get('/jobs/list', {'deviceId': deviceId});
     final list = resp['jobs'] as List<dynamic>? ?? [];
-    return list.map((e) => Job.fromJson(e as Map<String, dynamic>)).toList();
+    final jobs = list.map((e) => Job.fromJson(e as Map<String, dynamic>)).toList();
+    final merged = await _mergeJobsWithLocalCovers(jobs);
+    await saveCachedJobs(merged);
+    return merged;
+  }
+
+  /// 读取本地缓存任务（离线/优先展示）
+  Future<List<Job>> getCachedJobs() async {
+    final raw = await _loadJobsRaw();
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      final list = (jsonDecode(raw) as List<dynamic>)
+          .map((e) => Job.fromJson(e as Map<String, dynamic>))
+          .toList();
+      return await _mergeJobsWithLocalCovers(list);
+    } catch (_) {
+      await _removeJobsRaw();
+      return [];
+    }
+  }
+
+  Future<void> saveCachedJobs(List<Job> jobs) async {
+    final data = jobs.map((e) => e.toJson()).toList();
+    final raw = jsonEncode(data);
+    if (kIsWeb) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('$_jobsCachePrefix$deviceId', raw);
+      return;
+    }
+    final db = await _getDb();
+    await db.insert(
+      'jobs_cache',
+      {
+        'device_id': deviceId,
+        'jobs_json': raw,
+        'updated_at': DateTime.now().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> saveLocalCover(String jobId, String dataUri) async {
+    if (jobId.isEmpty || dataUri.isEmpty) return;
+    final map = await _loadCoverMap();
+    map[jobId] = dataUri;
+    await _saveCoverMap(map);
+
+    final cached = await getCachedJobs();
+    final updated = cached
+        .map((j) => j.jobId == jobId ? j.copyWith(coverImage: dataUri) : j)
+        .toList();
+    await saveCachedJobs(updated);
+  }
+
+  Future<void> removeLocalJobData(String jobId) async {
+    final map = await _loadCoverMap();
+    if (map.remove(jobId) != null) {
+      await _saveCoverMap(map);
+    }
   }
 
   /// 删除/取消任务
   Future<Map<String, dynamic>> deleteJob(String jobId) async {
-    return await _post('/jobs/delete', {'jobId': jobId});
+    final resp = await _post('/jobs/delete', {'jobId': jobId});
+    await removeLocalJobData(jobId);
+    final cached = await getCachedJobs();
+    await saveCachedJobs(cached.where((j) => j.jobId != jobId).toList());
+    return resp;
+  }
+
+  Future<List<Job>> _mergeJobsWithLocalCovers(List<Job> jobs) async {
+    final coverMap = await _loadCoverMap();
+    return jobs.map((job) {
+      if (job.coverImage != null && job.coverImage!.isNotEmpty) return job;
+      final local = coverMap[job.jobId];
+      if (local == null || local.isEmpty) return job;
+      return job.copyWith(coverImage: local);
+    }).toList();
+  }
+
+  Future<Map<String, String>> _loadCoverMap() async {
+    if (kIsWeb) {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_coversKey);
+      if (raw == null || raw.isEmpty) return <String, String>{};
+      try {
+        final decoded = jsonDecode(raw) as Map<String, dynamic>;
+        return decoded.map((k, v) => MapEntry(k, '$v'));
+      } catch (_) {
+        return <String, String>{};
+      }
+    }
+    final db = await _getDb();
+    final rows = await db.query('local_covers', columns: ['job_id', 'cover_data']);
+    final out = <String, String>{};
+    for (final row in rows) {
+      final id = '${row['job_id'] ?? ''}';
+      final data = '${row['cover_data'] ?? ''}';
+      if (id.isNotEmpty && data.isNotEmpty) {
+        out[id] = data;
+      }
+    }
+    return out;
+  }
+
+  Future<void> _saveCoverMap(Map<String, String> map) async {
+    if (kIsWeb) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_coversKey, jsonEncode(map));
+      return;
+    }
+    final db = await _getDb();
+    await db.transaction((txn) async {
+      await txn.delete('local_covers');
+      final now = DateTime.now().millisecondsSinceEpoch;
+      for (final e in map.entries) {
+        await txn.insert('local_covers', {
+          'job_id': e.key,
+          'cover_data': e.value,
+          'updated_at': now,
+        });
+      }
+    });
+  }
+
+  Future<Database> _getDb() async {
+    if (_db != null) return _db!;
+    final dbPath = await getDatabasesPath();
+    final path = p.join(dbPath, 'air_translate_local.db');
+    _db = await openDatabase(
+      path,
+      version: 1,
+      onCreate: (db, version) async {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS jobs_cache(
+            device_id TEXT PRIMARY KEY,
+            jobs_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS local_covers(
+            job_id TEXT PRIMARY KEY,
+            cover_data TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+          )
+        ''');
+      },
+    );
+    return _db!;
+  }
+
+  Future<String?> _loadJobsRaw() async {
+    if (kIsWeb) {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString('$_jobsCachePrefix$deviceId');
+    }
+    final db = await _getDb();
+    final rows = await db.query(
+      'jobs_cache',
+      columns: ['jobs_json'],
+      where: 'device_id = ?',
+      whereArgs: [deviceId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return rows.first['jobs_json'] as String?;
+  }
+
+  Future<void> _removeJobsRaw() async {
+    if (kIsWeb) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('$_jobsCachePrefix$deviceId');
+      return;
+    }
+    final db = await _getDb();
+    await db.delete('jobs_cache', where: 'device_id = ?', whereArgs: [deviceId]);
   }
 
   // -----------------------------------------------------------------------

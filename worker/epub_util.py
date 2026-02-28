@@ -134,7 +134,7 @@ def _collect_text_nodes(element: Tag) -> list[NavigableString]:
     for child in element.children:
         if isinstance(child, Tag):
             nodes.extend(_collect_text_nodes(child))
-        elif isinstance(child, NavigableString) and not isinstance(child, (type(child).__mro__[0] if hasattr(child, 'Comment') else type(None))):
+        elif isinstance(child, NavigableString):
             # 跳过 Comment 等特殊类型
             if type(child).__name__ in ("Comment", "ProcessingInstruction", "CData"):
                 continue

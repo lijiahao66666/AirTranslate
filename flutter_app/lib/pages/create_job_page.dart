@@ -26,8 +26,10 @@ class _CreateJobPageState extends State<CreateJobPage> {
   String _sourceLang = 'auto';
   String _targetLang = 'en';
   String _output = 'BILINGUAL';
-  bool _useContext = true;
+  bool _useContext = false;
   bool _useGlossary = false;
+  String _translateMode = 'PARAGRAPH'; // PARAGRAPH or CHAPTER
+  String? _localCoverImage;
 
   // 术语表
   Uint8List? _glossaryBytes;
@@ -98,15 +100,18 @@ class _CreateJobPageState extends State<CreateJobPage> {
         _fileBytes = file.bytes;
         _charCount = 0;
         _counting = true;
+        _localCoverImage = null;
       });
       // 精确计算：解压 EPUB 提取 HTML 纯文本字数 + 封面
       final bytes = file.bytes;
       if (bytes != null) {
         final count = EpubCharCounter.countChars(bytes);
+        final cover = EpubCharCounter.extractCoverBase64(bytes);
         if (mounted) {
           setState(() {
             _charCount = count.clamp(100, 10000000);
             _counting = false;
+            _localCoverImage = cover;
           });
         }
       } else {
@@ -151,6 +156,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
         charCount: _charCount,
         useContext: _engineType == 'AI' && _useContext,
         useGlossary: _engineType == 'AI' && _useGlossary && _glossaryBytes != null,
+        translateMode: _engineType == 'AI' ? _translateMode : 'PARAGRAPH',
       );
 
       final uploadInfo = result['upload'] as Map<String, dynamic>;
@@ -165,13 +171,16 @@ class _CreateJobPageState extends State<CreateJobPage> {
         await _api.uploadFile(glossaryInfo['url'] as String, _glossaryBytes!, 'application/json');
       }
 
-      // 4. 标记上传完成，加入队列
+      // 4. 标记上传完成（进入待启动）
       final jobId = result['jobId'] as String;
+      if (_localCoverImage != null && _localCoverImage!.isNotEmpty) {
+        await _api.saveLocalCover(jobId, _localCoverImage!);
+      }
       await _api.markUploaded(jobId);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('任务创建成功！'), behavior: SnackBarBehavior.floating),
+          const SnackBar(content: Text('提交成功，请回到列表点击“启动”开始翻译'), behavior: SnackBarBehavior.floating),
         );
         Navigator.pop(context, true);
       }
@@ -294,6 +303,24 @@ class _CreateJobPageState extends State<CreateJobPage> {
 
             // ── AI 高级选项 (仅 AI 显示) ──
             if (_engineType == 'AI') ...[
+              _sectionTitle('翻译粒度'),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  _modeChip(cs, '逐段翻译', 'PARAGRAPH'),
+                  const SizedBox(width: 12),
+                  _modeChip(cs, '章节翻译', 'CHAPTER'),
+                ],
+              ),
+              Padding(
+                padding: const EdgeInsets.only(top: 6, bottom: 12),
+                child: Text(
+                  _translateMode == 'CHAPTER'
+                      ? '将整章段落合并后翻译，上下文更连贯，翻译质量更高'
+                      : '逐段落单独翻译，速度更快，适合一般场景',
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                ),
+              ),
               _sectionTitle('AI翻译高级选项'),
               const SizedBox(height: 8),
               SwitchListTile(
@@ -348,7 +375,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
               onPressed: _submitting ? null : _submit,
               child: _submitting
                   ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Text('开始翻译'),
+                  : const Text('提交翻译'),
             ),
             const SizedBox(height: 32),
           ],
@@ -377,6 +404,20 @@ class _CreateJobPageState extends State<CreateJobPage> {
       decoration: InputDecoration(
         labelText: label,
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      ),
+    );
+  }
+
+  Widget _modeChip(ColorScheme cs, String label, String value) {
+    final selected = _translateMode == value;
+    return ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      onSelected: (_) => setState(() => _translateMode = value),
+      selectedColor: cs.primaryContainer,
+      labelStyle: TextStyle(
+        color: selected ? cs.primary : cs.onSurfaceVariant,
+        fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
       ),
     );
   }

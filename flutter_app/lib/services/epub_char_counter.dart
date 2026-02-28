@@ -30,12 +30,16 @@ class EpubCharCounter {
         final metaMatch = RegExp(r'<meta[^>]*name\s*=\s*"cover"[^>]*content\s*=\s*"([^"]+)"', caseSensitive: false).firstMatch(opfContent);
         if (metaMatch != null) {
           final coverId = metaMatch.group(1)!;
-          final itemMatch = RegExp('id\\s*=\\s*"${RegExp.escape(coverId)}"[^>]*href\\s*=\\s*"([^"]+)"', caseSensitive: false).firstMatch(opfContent);
+          // id 在 href 前
+          var itemMatch = RegExp('id\\s*=\\s*"${RegExp.escape(coverId)}"[^>]*href\\s*=\\s*"([^"]+)"', caseSensitive: false).firstMatch(opfContent);
+          // href 在 id 前
+          itemMatch ??= RegExp('href\\s*=\\s*"([^"]+)"[^>]*id\\s*=\\s*"${RegExp.escape(coverId)}"', caseSensitive: false).firstMatch(opfContent);
           if (itemMatch != null) coverHref = itemMatch.group(1);
         }
         // 方法 B: <item properties="cover-image" href="..."/>
         if (coverHref == null) {
-          final propMatch = RegExp(r'properties\s*=\s*"cover-image"[^>]*href\s*=\s*"([^"]+)"', caseSensitive: false).firstMatch(opfContent);
+          var propMatch = RegExp(r'properties\s*=\s*"cover-image"[^>]*href\s*=\s*"([^"]+)"', caseSensitive: false).firstMatch(opfContent);
+          propMatch ??= RegExp(r'href\s*=\s*"([^"]+)"[^>]*properties\s*=\s*"cover-image"', caseSensitive: false).firstMatch(opfContent);
           if (propMatch != null) coverHref = propMatch.group(1);
         }
       }
@@ -55,7 +59,8 @@ class EpubCharCounter {
       if (coverFile == null) return null;
 
       final bytes = coverFile.content as List<int>;
-      if (bytes.isEmpty || bytes.length > 30000) return null;
+      // 允许更大的封面，避免大多数 EPUB 回落为默认图
+      if (bytes.isEmpty || bytes.length > 400000) return null;
 
       final mime = _imageMime(coverFile.name);
       final b64 = base64Encode(Uint8List.fromList(bytes));

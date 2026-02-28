@@ -23,12 +23,22 @@ class _HomePageState extends State<HomePage> {
   int _balance = 0;
   bool _loading = true;
   Timer? _pollTimer;
+  int _pollTick = 0;
 
   @override
   void initState() {
     super.initState();
     _loadData();
     _pollTimer = Timer.periodic(const Duration(seconds: 8), (_) => _refreshJobs());
+  }
+
+  Future<void> _startJob(Job job) async {
+    try {
+      await _api.startJob(job.jobId);
+      await _loadData();
+    } catch (e) {
+      _showError('启动任务失败: $e');
+    }
   }
 
   @override
@@ -39,6 +49,13 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _loadData() async {
     setState(() => _loading = true);
+    final cachedJobs = await _api.getCachedJobs();
+    if (mounted && cachedJobs.isNotEmpty) {
+      setState(() {
+        _jobs = cachedJobs;
+        _loading = false;
+      });
+    }
     try {
       final results = await Future.wait([
         _api.listJobs(),
@@ -60,13 +77,26 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _refreshJobs() async {
+    _pollTick++;
+    final hasRunningJob = _jobs.any((j) =>
+        j.progress?.isRunning == true ||
+        j.progress?.state == 'CREATED' ||
+        j.progress?.state == 'UPLOADED');
+    if (!hasRunningJob && _pollTick % 4 != 0) {
+      return;
+    }
     try {
       final jobs = await _api.listJobs();
-      final balance = await _api.getBalance();
+      int? balance;
+      if (_pollTick % 4 == 0) {
+        balance = await _api.getBalance();
+      }
       if (mounted) {
         setState(() {
           _jobs = jobs;
-          _balance = balance;
+          if (balance != null) {
+            _balance = balance;
+          }
         });
       }
     } catch (_) {}
@@ -83,12 +113,13 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _deleteJob(Job job) async {
     final state = job.progress?.state ?? 'CREATED';
-    final isStarted = state == 'TRANSLATING' || state == 'DONE' || state == 'FAILED';
+    final refundableStates = {'CREATED', 'READY', 'UPLOADED'};
+    final canRefund = refundableStates.contains(state);
     final isAI = job.engineType == 'AI' && job.pointsDeducted > 0;
     String hint;
-    if (isAI && !isStarted) {
+    if (isAI && canRefund) {
       hint = '任务尚未开始翻译，删除后将自动退还 ${NumberFormat("#,###").format(job.pointsDeducted)} 积分。';
-    } else if (isAI && isStarted) {
+    } else if (isAI) {
       hint = '任务已开始翻译，删除后积分不予退还。';
     } else {
       hint = '确定要删除该任务吗？';
@@ -104,19 +135,36 @@ class _HomePageState extends State<HomePage> {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           ),
-          content: Text(hint, style: TextStyle(fontSize: 13, color: dcs.onSurfaceVariant)),
-          actionsAlignment: MainAxisAlignment.end,
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消', style: TextStyle(fontSize: 13)),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              style: FilledButton.styleFrom(backgroundColor: dcs.error),
-              child: const Text('删除', style: TextStyle(fontSize: 13)),
-            ),
-          ],
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(hint, style: TextStyle(fontSize: 13, color: dcs.onSurfaceVariant)),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextButton(
+                      onPressed: () => Navigator.pop(ctx, false),
+                      style: TextButton.styleFrom(minimumSize: const Size(0, 36)),
+                      child: const Text('取消', style: TextStyle(fontSize: 13)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: () => Navigator.pop(ctx, true),
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 36),
+                        backgroundColor: dcs.error,
+                      ),
+                      child: const Text('删除', style: TextStyle(fontSize: 13)),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         );
       },
     );
@@ -163,10 +211,28 @@ class _HomePageState extends State<HomePage> {
               ),
               title: Row(
                 mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  Icon(Icons.auto_stories_rounded, color: Colors.white.withValues(alpha: 0.9), size: 22),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(5),
+                    child: Image.asset(
+                      'web/icons/Icon-192.png',
+                      width: 24,
+                      height: 24,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
                   const SizedBox(width: 8),
-                  const Text('灵译', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18, letterSpacing: 2)),
+                  const Text(
+                    '灵译',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 18,
+                      letterSpacing: 1,
+                      height: 1.0,
+                    ),
+                  ),
                 ],
               ),
               actions: [
@@ -219,7 +285,7 @@ class _HomePageState extends State<HomePage> {
                       const SizedBox(height: 16),
                       Text('还没有翻译任务', style: TextStyle(fontSize: 16, color: cs.onSurfaceVariant)),
                       const SizedBox(height: 8),
-                      Text('点击下方按钮开始翻译书籍', style: TextStyle(fontSize: 14, color: cs.outlineVariant)),
+                      Text('点击下方按钮新建并提交翻译任务', style: TextStyle(fontSize: 14, color: cs.outlineVariant)),
                     ],
                   ),
                 ),
@@ -232,6 +298,7 @@ class _HomePageState extends State<HomePage> {
                     return JobCard(
                       job: job,
                       onDownload: job.progress?.isDone == true ? () => _download(job) : null,
+                      onStart: job.progress?.state == 'READY' ? () => _startJob(job) : null,
                       onDelete: () => _deleteJob(job),
                     ).animate().fadeIn(duration: 300.ms, delay: (index * 50).ms).slideY(begin: 0.05, end: 0);
                   },
@@ -253,7 +320,7 @@ class _HomePageState extends State<HomePage> {
             MaterialPageRoute(builder: (_) => const CreateJobPage()),
           );
           if (result == true) {
-            _refreshJobs();
+            _loadData();
           }
         },
         icon: const Icon(Icons.add),

@@ -2,10 +2,10 @@
 
 // =========================================================================
 // AirTranslate Server (v4 - local filesystem)
-// - 积分/卡密/任务/进度/队列: 本地文件系统 ./data/
+// - 积分/任务/进度/队列: 本地文件系统 ./data/
 // - COS: 仅用于 presign URL (EPUB 上传/下载/术语表)
 // - /jobs/*    : App 面向的 API
-// - /billing/* : 积分/卡密 API
+// - /billing/* : 积分 API
 // - /worker/*  : Worker 内部 API (获取队列/更新进度/完成/失败)
 // - 端口 9001 (避免和 AirRead 的 9000 冲突)
 // =========================================================================
@@ -14,7 +14,6 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
-const https = require('https');
 
 // ---------------------------------------------------------------------------
 // 加载 .env 文件 (零依赖)
@@ -45,7 +44,6 @@ const https = require('https');
 const DATA_DIR = path.join(__dirname, 'data');
 const DIRS = {
   points:   path.join(DATA_DIR, 'points'),
-  usedKeys: path.join(DATA_DIR, 'used_keys'),
   jobs:     path.join(DATA_DIR, 'jobs'),
   queue:    path.join(DATA_DIR, 'queue'),
 };
@@ -73,17 +71,9 @@ function writeJsonFile(filePath, obj) {
   fs.writeFileSync(filePath, JSON.stringify(obj, null, 2), 'utf8');
 }
 
-function fileExists(filePath) {
-  return fs.existsSync(filePath);
-}
-
 // ---------------------------------------------------------------------------
 // 通用工具
 // ---------------------------------------------------------------------------
-
-function sha256Hex(s) {
-  return crypto.createHash('sha256').update(String(s || ''), 'utf8').digest('hex');
-}
 
 function sha1Hex(s) {
   return crypto.createHash('sha1').update(String(s || ''), 'utf8').digest('hex');
@@ -95,23 +85,6 @@ function hmacSha1Hex(key, msg) {
 
 function uriEncode(s) {
   return encodeURIComponent(String(s || '')).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-}
-
-function base64UrlDecode(str) {
-  let s = String(str || '').replace(/-/g, '+').replace(/_/g, '/');
-  while (s.length % 4) s += '=';
-  return Buffer.from(s, 'base64');
-}
-
-function getEd25519PublicKey(base64Key) {
-  const prefix = Buffer.from('302a300506032b6570032100', 'hex');
-  const rawKey = Buffer.from(String(base64Key || ''), 'base64');
-  if (rawKey.length !== 32) throw new Error('Invalid Ed25519 public key length');
-  return crypto.createPublicKey({ key: Buffer.concat([prefix, rawKey]), format: 'der', type: 'spki' });
-}
-
-function verifyEd25519(data, signature, publicKey) {
-  return crypto.verify(null, data, publicKey, signature);
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +350,11 @@ function dequeue(jobId) {
   try { fs.unlinkSync(filePath); } catch (_) {}
 }
 
+function isQueued(jobId) {
+  const filePath = path.join(DIRS.queue, `${jobId}.json`);
+  return fs.existsSync(filePath);
+}
+
 function peekQueue() {
   try {
     const files = fs.readdirSync(DIRS.queue).filter((f) => f.endsWith('.json')).sort();
@@ -385,6 +363,28 @@ function peekQueue() {
     return data ? data.jobId : files[0].replace('.json', '');
   } catch (_) {
     return null;
+  }
+}
+
+function listQueue(limit = 5) {
+  try {
+    const files = fs.readdirSync(DIRS.queue).filter((f) => f.endsWith('.json')).sort();
+    const ids = [];
+    for (const f of files) {
+      if (ids.length >= limit) break;
+      const data = readJsonFile(path.join(DIRS.queue, f));
+      const id = data ? data.jobId : f.replace('.json', '');
+      // 跳过已完成/已取消的僵尸队列项
+      const progress = readProgress(id);
+      if (progress && (progress.state === 'DONE' || progress.state === 'CANCELED')) {
+        dequeue(id);
+        continue;
+      }
+      ids.push(id);
+    }
+    return ids;
+  } catch (_) {
+    return [];
   }
 }
 
@@ -405,6 +405,7 @@ function handleCreateJob(res, body) {
   const charCount = Number(body.charCount || 0) || 0;
   const useContext = Boolean(body.useContext);
   const useGlossary = Boolean(body.useGlossary);
+  const translateMode = String(body.translateMode || 'PARAGRAPH').trim().toUpperCase() === 'CHAPTER' ? 'CHAPTER' : 'PARAGRAPH';
 
   if (!targetLang) return sendJson(res, 400, { error: 'BadRequest', message: 'targetLang required' });
   if (!sourceFileName) return sendJson(res, 400, { error: 'BadRequest', message: 'sourceFileName required' });
@@ -428,7 +429,7 @@ function handleCreateJob(res, body) {
 
   const spec = {
     jobId, engineType, output, deviceId, sourceLang, targetLang,
-    sourceFileName, charCount, useContext, useGlossary,
+    sourceFileName, charCount, useContext, useGlossary, translateMode,
     pointsDeducted, createdAt: nowIso,
   };
   const progress = { jobId, state: 'CREATED', percent: 0, engineType, output, updatedAt: nowIso };
@@ -457,7 +458,7 @@ function handleCreateJob(res, body) {
 }
 
 // ---------------------------------------------------------------------------
-// API: POST /jobs/markUploaded  (App上传完EPUB后调用，排队)
+// API: POST /jobs/markUploaded  (App上传完EPUB后调用，标记为待启动)
 // ---------------------------------------------------------------------------
 
 function handleMarkUploaded(res, body) {
@@ -467,14 +468,41 @@ function handleMarkUploaded(res, body) {
   const progress = readProgress(jobId);
   if (!progress) return sendJson(res, 404, { error: 'NotFound' });
 
+  progress.state = 'READY';
+  progress.updatedAt = new Date().toISOString();
+  writeProgress(jobId, progress);
+
+  return sendJson(res, 200, { ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// API: POST /jobs/start  (用户手动启动翻译，加入队列)
+// ---------------------------------------------------------------------------
+
+function handleStartJob(res, body) {
+  const jobId = String(body.jobId || '').trim();
+  if (!jobId) return sendJson(res, 400, { error: 'BadRequest', message: 'jobId required' });
+
+  const progress = readProgress(jobId);
+  if (!progress) return sendJson(res, 404, { error: 'NotFound' });
+
+  const state = String(progress.state || 'CREATED').toUpperCase();
+  if (state === 'DONE' || state === 'FAILED') {
+    return sendJson(res, 409, { error: 'InvalidState', message: `cannot start from state ${state}` });
+  }
+  if (state !== 'READY' && state !== 'UPLOADED') {
+    return sendJson(res, 409, { error: 'InvalidState', message: `cannot start from state ${state}` });
+  }
+
+  if (!isQueued(jobId)) {
+    enqueue(jobId);
+  }
+
   progress.state = 'UPLOADED';
   progress.updatedAt = new Date().toISOString();
   writeProgress(jobId, progress);
 
-  // 加入队列
-  enqueue(jobId);
-
-  return sendJson(res, 200, { ok: true });
+  return sendJson(res, 200, { ok: true, queued: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -573,9 +601,9 @@ function handleDeleteJob(res, body) {
   // 从队列中移除
   dequeue(jobId);
 
-  // 退还积分（仅未开始翻译的 AI 任务：CREATED / UPLOADED）
+  // 退还积分（仅未开始翻译的 AI 任务：CREATED / READY / UPLOADED）
   let refunded = 0;
-  const canRefund = (state === 'CREATED' || state === 'UPLOADED');
+  const canRefund = (state === 'CREATED' || state === 'READY' || state === 'UPLOADED');
   if (canRefund && spec.pointsDeducted > 0 && spec.deviceId && !progress._refunded) {
     const cur = readPointsBalance(spec.deviceId);
     writePointsBalance(spec.deviceId, cur + spec.pointsDeducted);
@@ -637,55 +665,6 @@ function handleCheckinStatus(res, body) {
 }
 
 // ---------------------------------------------------------------------------
-// API: POST /billing/redeem
-// ---------------------------------------------------------------------------
-
-function handleRedeem(res, body) {
-  const licenseCode = String(body.licenseCode || body.license_code || '').trim();
-  const deviceId = String(body.deviceId || body.device_id || '').trim();
-  if (!licenseCode) return sendJson(res, 400, { error: 'BadRequest', message: 'licenseCode required' });
-  if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
-
-  // Ed25519 验签
-  const pubKeyB64 = String(process.env.LICENSE_PUBLIC_KEY || '').trim();
-  let pointsIndex = null;
-  if (pubKeyB64) {
-    try {
-      if (!licenseCode.startsWith('P3')) throw new Error('Invalid version');
-      const bytes = base64UrlDecode(licenseCode.substring(2));
-      if (bytes.length !== 5 + 64) throw new Error('Invalid length');
-      const payload = bytes.slice(0, 5);
-      const signature = bytes.slice(5);
-      const publicKey = getEd25519PublicKey(pubKeyB64);
-      if (!verifyEd25519(payload, signature, publicKey)) {
-        return sendJson(res, 403, { error: 'InvalidLicenseSignature' });
-      }
-      pointsIndex = payload[0];
-    } catch (e) {
-      return sendJson(res, 400, { error: 'InvalidLicenseFormat', message: String(e && e.message ? e.message : e) });
-    }
-  }
-
-  // 防重复兑换
-  const codeHash = sha256Hex(licenseCode);
-  const usedFile = path.join(DIRS.usedKeys, `${codeHash}.json`);
-  if (fileExists(usedFile)) {
-    return sendJson(res, 409, { used: true, alreadyUsed: true, codeHash });
-  }
-  writeJsonFile(usedFile, { deviceId, redeemedAt: new Date().toISOString() });
-
-  const map = [50000, 100000, 200000, 500000, 1000000];
-  const idx = pointsIndex == null ? 0 : Number(pointsIndex);
-  const pointsAdded = idx >= 0 && idx < map.length ? map[idx] : 0;
-  if (pointsAdded <= 0) return sendJson(res, 400, { error: 'UnsupportedPointsIndex' });
-
-  const prev = readPointsBalance(deviceId);
-  const balance = writePointsBalance(deviceId, prev + pointsAdded);
-
-  return sendJson(res, 200, { used: false, alreadyUsed: false, codeHash, pointsAdded, balance });
-}
-
-// ---------------------------------------------------------------------------
 // Worker API: GET /worker/poll  — 获取下一个待处理任务
 // ---------------------------------------------------------------------------
 
@@ -736,6 +715,49 @@ function handleWorkerPoll(req, res) {
       glossaryDownloadUrl,
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Worker API: GET /worker/poll-batch  — 批量获取待处理任务 (窗口调度)
+// ---------------------------------------------------------------------------
+
+function handleWorkerPollBatch(req, res) {
+  if (!verifyWorkerKey(req)) return sendJson(res, 403, { error: 'Forbidden' });
+
+  const url = new URL(req.url || '/', 'http://localhost');
+  const limit = Math.min(Number(url.searchParams.get('limit') || '5') || 5, 20);
+
+  const jobIds = listQueue(limit);
+  if (jobIds.length === 0) return sendJson(res, 200, { jobs: [] });
+
+  const { presignSeconds } = getCosConfig();
+  const jobs = [];
+
+  for (const jobId of jobIds) {
+    const job = readJobSpec(jobId);
+    if (!job) { dequeue(jobId); continue; }
+
+    const sourceKey = buildCosKey(`${jobId}/source.epub`);
+    const sourceDownloadUrl = cosPresignUrl({ method: 'GET', key: sourceKey, expiresSeconds: presignSeconds, headers: {} });
+    const bilingualKey = buildCosKey(`${jobId}/bilingual.epub`);
+    const bilingualUploadUrl = cosPresignUrl({ method: 'PUT', key: bilingualKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
+    const translatedKey = buildCosKey(`${jobId}/translated.epub`);
+    const translatedUploadUrl = cosPresignUrl({ method: 'PUT', key: translatedKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
+
+    let glossaryDownloadUrl = null;
+    if (job.engineType === 'AI' && job.useGlossary) {
+      const glossaryKey = buildCosKey(`${jobId}/glossary.json`);
+      glossaryDownloadUrl = cosPresignUrl({ method: 'GET', key: glossaryKey, expiresSeconds: presignSeconds, headers: {} });
+    }
+
+    jobs.push({
+      jobId,
+      job,
+      cos: { sourceDownloadUrl, bilingualUploadUrl, translatedUploadUrl, glossaryDownloadUrl },
+    });
+  }
+
+  return sendJson(res, 200, { jobs });
 }
 
 // ---------------------------------------------------------------------------
@@ -853,6 +875,7 @@ const server = http.createServer(async (req, res) => {
     // --- Jobs (App-facing) ---
     if (req.method === 'POST' && pathname === '/jobs/create') return handleCreateJob(res, body);
     if (req.method === 'POST' && pathname === '/jobs/markUploaded') return handleMarkUploaded(res, body);
+    if (req.method === 'POST' && pathname === '/jobs/start') return handleStartJob(res, body);
     if (req.method === 'GET' && pathname === '/jobs/progress') return handleGetProgress(res, String(url.searchParams.get('jobId') || '').trim());
     if (req.method === 'GET' && pathname === '/jobs/download') return handleGetDownloadUrl(res, String(url.searchParams.get('jobId') || '').trim(), url.searchParams.get('output'));
     if (req.method === 'GET' && pathname === '/jobs/list') return handleListJobs(res, String(url.searchParams.get('deviceId') || '').trim());
@@ -860,7 +883,6 @@ const server = http.createServer(async (req, res) => {
 
     // --- Billing ---
     if (req.method === 'POST' && pathname === '/billing/init') return handleBillingInit(res, body);
-    if (req.method === 'POST' && pathname === '/billing/redeem') return handleRedeem(res, body);
     if (req.method === 'GET' && pathname === '/billing/balance') return handleBalance(res, String(url.searchParams.get('deviceId') || '').trim());
 
     // --- Config ---
@@ -874,6 +896,7 @@ const server = http.createServer(async (req, res) => {
 
     // --- Worker (internal) ---
     if (req.method === 'GET' && pathname === '/worker/poll') return handleWorkerPoll(req, res);
+    if (req.method === 'GET' && pathname === '/worker/poll-batch') return handleWorkerPollBatch(req, res);
     if (req.method === 'POST' && pathname === '/worker/progress') return handleWorkerProgress(req, res, body);
     if (req.method === 'POST' && pathname === '/worker/complete') return handleWorkerComplete(req, res, body);
     if (req.method === 'POST' && pathname === '/worker/fail') return handleWorkerFail(req, res, body);

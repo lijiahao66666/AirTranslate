@@ -1,13 +1,12 @@
 """
 翻译引擎模块
 - 机器翻译：Azure Edge → MyMemory → Google (链式退避，国内优先)
-- AI翻译：本地 transformers HY-MT1.5 (支持上下文 + 术语表)
+- AI翻译：vLLM OpenAI-compatible API（支持上下文 + 术语表）
 """
 
 import logging
 import os
 import time
-import urllib.parse
 from typing import Optional
 
 import httpx
@@ -190,12 +189,43 @@ def _translate_google(texts: list[str], src_lang: str, tgt_lang: str) -> list[st
 # AI翻译：vLLM OpenAI-compatible API
 # ---------------------------------------------------------------------------
 
+# vLLM context = input + output, 由 VLLM_MAX_MODEL_LEN 控制
+# Token 估算: 中文 ~1.5 tok/char, 英文 ~1.3 tok/char
+# Prompt 指令/术语/上下文额外开销 ~200-400 tokens
+_MAX_MODEL_LEN = int(os.getenv("VLLM_MAX_MODEL_LEN", "8192"))  # 与 start_vllm.sh 中 --max-model-len 保持一致
+
+# 输入字符上限: 按 max_model_len 动态计算
+# 保守策略: input 占 context 的 ~1/3, output 占 ~2/3
+# 1 token ≈ 1.5 中文字符, 所以 max_input_tokens * 1.5 ≈ max_input_chars
+_default_input_chars = str(int(_MAX_MODEL_LEN / 3 * 1.5))  # 段落
+_default_chapter_chars = str(int(_MAX_MODEL_LEN / 3 * 1.5 * 2))  # 章节(可更大因为输出也更多)
+_MAX_INPUT_CHARS = int(os.getenv("VLLM_MAX_INPUT_CHARS", _default_input_chars))
+_MAX_CHAPTER_INPUT_CHARS = int(os.getenv("VLLM_MAX_CHAPTER_INPUT_CHARS", _default_chapter_chars))
+
+# 上下文 token 预算: 占 max_model_len 的 1/4, 转换为字符数 (1 token ≈ 1.5 chars)
+_CONTEXT_TOKEN_BUDGET = _MAX_MODEL_LEN // 4
+_CONTEXT_CHAR_BUDGET = int(_CONTEXT_TOKEN_BUDGET * 1.5)
+
 _VLLM_GEN_KWARGS = {
     "top_k": 20,
     "top_p": 0.6,
     "temperature": 0.7,
     "repetition_penalty": 1.05,
 }
+
+
+def _is_cn_involved(src_lang: str, tgt_lang: str) -> bool:
+    """判断是否涉及中文"""
+    cn_langs = {"zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant"}
+    return src_lang.lower() in cn_langs or tgt_lang.lower() in cn_langs
+
+
+def _build_glossary_block(glossary: dict) -> str:
+    """构建术语表块 (模型 README 格式)"""
+    glossary_lines = "\n".join(
+        f"{k} 翻译成 {v}" for k, v in glossary.items()
+    )
+    return f"参考下面的翻译：\n{glossary_lines}"
 
 
 def _build_ai_prompt(
@@ -205,25 +235,27 @@ def _build_ai_prompt(
     context: Optional[str] = None,
     glossary: Optional[dict] = None,
 ) -> str:
-    """构建 HY-MT1.5 翻译 prompt"""
+    """构建 HY-MT1.5 翻译 prompt (严格遵循模型 README 模板)
+
+    模板优先级:
+    1. 术语 + 上下文: glossary_block + context + 指令 + source
+    2. 仅术语: glossary_block + 指令 + source  (README: terminology)
+    3. 仅上下文: context + 指令 + source  (README: contextual)
+    4. 无: 指令 + source  (README: basic)
+    """
     parts = []
 
-    # 术语表
+    # 术语表 (放最前面)
     if glossary:
-        glossary_lines = "\n".join(
-            f"{k} 翻译成 {v}" for k, v in glossary.items()
-        )
-        parts.append(f"参考下面的翻译：\n{glossary_lines}")
+        parts.append(_build_glossary_block(glossary))
 
-    # 上下文
+    # 上下文 + 指令
     if context:
         parts.append(context)
-        parts.append(f"参考上面的信息，把下面的文本翻译成{tgt_lang}，注意只需要输出翻译后的结果，不要额外解释：")
+        # README: "参考上面的信息，把下面的文本翻译成{target_language}，注意不需要翻译上文，也不要额外解释："
+        parts.append(f"参考上面的信息，把下面的文本翻译成{tgt_lang}，注意不需要翻译上文，也不要额外解释：")
     else:
-        # 判断是否为中外互译
-        cn_langs = {"zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant"}
-        is_cn_involved = src_lang.lower() in cn_langs or tgt_lang.lower() in cn_langs
-        if is_cn_involved:
+        if _is_cn_involved(src_lang, tgt_lang):
             parts.append(f"将以下文本翻译为{tgt_lang}，注意只需要输出翻译后的结果，不要额外解释：")
         else:
             parts.append(f"Translate the following segment into {tgt_lang}, without additional explanation.")
@@ -242,6 +274,12 @@ def translate_ai(
     """AI翻译：通过 vLLM OpenAI-compatible API 推理"""
     vllm_url = os.getenv("VLLM_API_URL", "http://localhost:8000").rstrip("/")
     model_name = os.getenv("VLLM_MODEL_NAME", "HY-MT1.5")
+    min_output_tokens = int(os.getenv("VLLM_MIN_OUTPUT_TOKENS", "256"))
+    max_output_tokens = int(os.getenv("VLLM_MAX_OUTPUT_TOKENS", "4096"))
+    # 硬上限: 不能超过 max_model_len 的一半 (留空间给 input)
+    max_output_tokens = min(max_output_tokens, _MAX_MODEL_LEN // 2)
+    if max_output_tokens < min_output_tokens:
+        max_output_tokens = min_output_tokens
 
     results = []
     total = len(texts)
@@ -253,9 +291,15 @@ def translate_ai(
             log.info("[AI] Segment %d/%d: empty, skipped", i + 1, total)
             continue
 
+        # 超长段落截断，避免溢出 max-model-len
+        if len(text) > _MAX_INPUT_CHARS:
+            log.warning("[AI] Segment %d/%d: %d chars exceeds limit %d, truncating",
+                        i + 1, total, len(text), _MAX_INPUT_CHARS)
+            text = text[:_MAX_INPUT_CHARS]
+
         seg_start = time.time()
         prompt = _build_ai_prompt(text, src_lang, tgt_lang, context, glossary)
-        max_new = max(len(text) * 3, 512)
+        max_new = min(max(len(text) * 4, min_output_tokens), max_output_tokens)
 
         payload = {
             "model": model_name,
@@ -299,3 +343,177 @@ def translate_ai(
 
     log.info("[AI] All %d segments translated", total)
     return results
+
+
+# ---------------------------------------------------------------------------
+# AI翻译：章节级别（将多段合并为一次请求，超长自动分块）
+# ---------------------------------------------------------------------------
+
+def translate_ai_chapter(
+    texts: list[str],
+    src_lang: str,
+    tgt_lang: str,
+    context: Optional[str] = None,
+    glossary: Optional[dict] = None,
+) -> list[str]:
+    """章节级别 AI 翻译：将段落合并后整体翻译，超长时自动分块。
+
+    返回与 texts 等长的翻译列表。
+    """
+    if not texts:
+        return []
+
+    # 过滤空段落，记录索引映射
+    non_empty: list[tuple[int, str]] = []
+    for i, t in enumerate(texts):
+        if t and t.strip():
+            non_empty.append((i, t))
+
+    if not non_empty:
+        return list(texts)
+
+    # 按 _MAX_CHAPTER_INPUT_CHARS 分块
+    chunks: list[list[tuple[int, str]]] = []
+    current_chunk: list[tuple[int, str]] = []
+    current_len = 0
+    for idx, text in non_empty:
+        text_len = len(text)
+        if current_chunk and current_len + text_len > _MAX_CHAPTER_INPUT_CHARS:
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_len = 0
+        current_chunk.append((idx, text))
+        current_len += text_len
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    log.info("[AI-Chapter] %d paragraphs split into %d chunk(s)", len(non_empty), len(chunks))
+
+    # 初始化结果（默认保持原文）
+    results = list(texts)
+
+    vllm_url = os.getenv("VLLM_API_URL", "http://localhost:8000").rstrip("/")
+    model_name = os.getenv("VLLM_MODEL_NAME", "HY-MT1.5")
+    min_output_tokens = int(os.getenv("VLLM_MIN_OUTPUT_TOKENS", "256"))
+    max_output_tokens = int(os.getenv("VLLM_MAX_OUTPUT_TOKENS", "4096"))
+    # 硬上限: 不能超过 max_model_len 的一半 (留空间给 input)
+    max_output_tokens = min(max_output_tokens, _MAX_MODEL_LEN // 2)
+    if max_output_tokens < min_output_tokens:
+        max_output_tokens = min_output_tokens
+
+    separator = "\n\n"
+
+    for ci, chunk in enumerate(chunks):
+        chunk_texts = [t for _, t in chunk]
+        combined = separator.join(chunk_texts)
+        total_chars = len(combined)
+
+        seg_start = time.time()
+        prompt = _build_chapter_prompt(combined, src_lang, tgt_lang, context, glossary, separator)
+        max_new = min(max(total_chars * 4, min_output_tokens), max_output_tokens)
+
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_new,
+            "stream": False,
+            **_VLLM_GEN_KWARGS,
+        }
+
+        try:
+            log.info("[AI-Chapter] Chunk %d/%d: %d paragraphs, %d chars, max_tokens=%d",
+                     ci + 1, len(chunks), len(chunk_texts), total_chars, max_new)
+
+            resp = httpx.post(
+                f"{vllm_url}/v1/chat/completions",
+                json=payload,
+                timeout=300,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            raw_result = data["choices"][0]["message"]["content"].strip()
+            usage = data.get("usage", {})
+            in_tok = usage.get("prompt_tokens", "?")
+            out_tok = usage.get("completion_tokens", "?")
+            elapsed = time.time() - seg_start
+            log.info("[AI-Chapter] Chunk %d/%d: done in %.1fs, in=%s out=%s tokens",
+                     ci + 1, len(chunks), elapsed, in_tok, out_tok)
+
+            # 拆分翻译结果回各段落
+            translated_parts = raw_result.split(separator)
+
+            # 对齐：如果拆分数量不匹配，尝试用单换行分割
+            if len(translated_parts) != len(chunk_texts):
+                translated_parts = raw_result.split("\n")
+                translated_parts = [p.strip() for p in translated_parts if p.strip()]
+
+            for j, (orig_idx, _) in enumerate(chunk):
+                if j < len(translated_parts) and translated_parts[j].strip():
+                    result = translated_parts[j].strip()
+                    # 去掉模型可能输出的注释
+                    note_idx = result.find("（注")
+                    if note_idx != -1:
+                        result = result[:note_idx].strip()
+                    results[orig_idx] = result
+
+        except Exception as e:
+            elapsed = time.time() - seg_start
+            log.error("[AI-Chapter] Chunk %d/%d FAILED after %.1fs: %s",
+                      ci + 1, len(chunks), elapsed, e)
+            # 保持原文
+
+    log.info("[AI-Chapter] All %d paragraphs translated", len(non_empty))
+    return results
+
+
+def _build_chapter_prompt(
+    combined_text: str,
+    src_lang: str,
+    tgt_lang: str,
+    context: Optional[str] = None,
+    glossary: Optional[dict] = None,
+    separator: str = "\n\n",
+) -> str:
+    """构建章节级翻译 prompt，要求模型保持段落分隔 (遵循 README 模板)"""
+    parts = []
+
+    # 术语表
+    if glossary:
+        parts.append(_build_glossary_block(glossary))
+
+    # 上下文 + 指令
+    is_cn = _is_cn_involved(src_lang, tgt_lang)
+
+    if context:
+        parts.append(context)
+        if is_cn:
+            instruction = (
+                f"参考上面的信息，把下面的文本翻译成{tgt_lang}，注意不需要翻译上文，也不要额外解释。"
+                f"文本由多个段落组成，段落之间用空行分隔，请保持相同的段落分隔格式："
+            )
+        else:
+            instruction = (
+                f"Based on the context above, translate the following text into {tgt_lang}. "
+                f"Do not translate the context. "
+                f"The text consists of multiple paragraphs separated by blank lines. "
+                f"Keep the same paragraph separation and output only the translation."
+            )
+    else:
+        if is_cn:
+            instruction = (
+                f"将以下文本翻译为{tgt_lang}。"
+                f"文本由多个段落组成，段落之间用空行分隔。"
+                f"请保持相同的段落分隔格式，逐段翻译，只输出翻译结果，不要额外解释："
+            )
+        else:
+            instruction = (
+                f"Translate the following text into {tgt_lang}. "
+                f"The text consists of multiple paragraphs separated by blank lines. "
+                f"Keep the same paragraph separation, translate each paragraph, "
+                f"and output only the translation without additional explanation."
+            )
+
+    parts.append(instruction)
+    parts.append(combined_text)
+    return "\n\n".join(parts)

@@ -7,6 +7,7 @@ import '../models/job.dart';
 class JobCard extends StatefulWidget {
   final Job job;
   final VoidCallback? onDownload;
+  final VoidCallback? onStart;
   final VoidCallback? onTap;
   final VoidCallback? onDelete;
 
@@ -14,6 +15,7 @@ class JobCard extends StatefulWidget {
     super.key,
     required this.job,
     this.onDownload,
+    this.onStart,
     this.onTap,
     this.onDelete,
   });
@@ -142,25 +144,52 @@ class _JobCardState extends State<JobCard> {
           Text('翻译完成', style: TextStyle(color: Colors.green.shade600, fontWeight: FontWeight.w500)),
           const Spacer(),
           if (widget.onDownload != null)
-            GestureDetector(
-              onTap: widget.onDownload,
-              child: Container(
-                height: 30,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                decoration: BoxDecoration(
-                  color: cs.primary,
-                  borderRadius: BorderRadius.circular(15),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.download_rounded, size: 14, color: cs.onPrimary),
-                    const SizedBox(width: 4),
-                    Text('下载', style: TextStyle(fontSize: 12, color: cs.onPrimary, fontWeight: FontWeight.w500)),
-                  ],
-                ),
-              ),
+            _actionButton(
+              cs: cs,
+              icon: Icons.download_rounded,
+              label: '下载',
+              onTap: widget.onDownload!,
+              filled: true,
             ),
+        ],
+      );
+    }
+
+    if (state == 'READY') {
+      return Row(
+        children: [
+          Icon(Icons.pause_circle_outline_rounded, color: cs.onSurfaceVariant, size: 18),
+          const SizedBox(width: 8),
+          Text('待启动', style: TextStyle(color: cs.onSurfaceVariant)),
+          const Spacer(),
+          if (widget.onStart != null)
+            _actionButton(
+              cs: cs,
+              icon: Icons.play_arrow_rounded,
+              label: '启动',
+              onTap: widget.onStart!,
+              filled: false,
+            ),
+        ],
+      );
+    }
+
+    if (state == 'CREATED') {
+      return Row(
+        children: [
+          SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: cs.primary)),
+          const SizedBox(width: 8),
+          Text('上传中...', style: TextStyle(color: cs.onSurfaceVariant)),
+        ],
+      );
+    }
+
+    if (state == 'UPLOADED') {
+      return Row(
+        children: [
+          SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: cs.primary)),
+          const SizedBox(width: 8),
+          Text('排队中...', style: TextStyle(color: cs.onSurfaceVariant)),
         ],
       );
     }
@@ -177,16 +206,6 @@ class _JobCardState extends State<JobCard> {
             ),
           ),
           Icon(Icons.expand_more, color: cs.onSurfaceVariant, size: 20),
-        ],
-      );
-    }
-
-    if (state == 'CREATED' || state == 'UPLOADED') {
-      return Row(
-        children: [
-          SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: cs.primary)),
-          const SizedBox(width: 8),
-          Text('排队中...', style: TextStyle(color: cs.onSurfaceVariant)),
         ],
       );
     }
@@ -236,6 +255,40 @@ class _JobCardState extends State<JobCard> {
         if (progress.isFailed && progress.error != null)
           _detailRow(cs, '❌', '错误', progress.error!.message),
       ],
+    );
+  }
+
+  Widget _actionButton({
+    required ColorScheme cs,
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    bool filled = true,
+  }) {
+    final bg = filled ? cs.primary : cs.secondaryContainer;
+    final fg = filled ? cs.onPrimary : cs.onSecondaryContainer;
+    return Material(
+      color: bg,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Container(
+          height: 32,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 15, color: fg),
+              const SizedBox(width: 5),
+              Text(
+                label,
+                style: TextStyle(fontSize: 12.5, color: fg, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
