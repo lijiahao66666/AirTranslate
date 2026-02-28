@@ -3,6 +3,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/api_service.dart';
+import '../services/epub_char_counter.dart';
 import '../widgets/engine_selector.dart';
 
 class CreateJobPage extends StatefulWidget {
@@ -18,12 +19,12 @@ class _CreateJobPageState extends State<CreateJobPage> {
   // 文件
   String? _fileName;
   Uint8List? _fileBytes;
-  int _charCount = 0; // 预估字数 (文件大小 / 2 粗略估算)
+  int _charCount = 0;
 
   // 选项
   String _engineType = 'MACHINE';
   String _sourceLang = 'auto';
-  String _targetLang = 'zh';
+  String _targetLang = 'en';
   String _output = 'BILINGUAL';
   bool _useContext = true;
   bool _useGlossary = false;
@@ -34,23 +35,46 @@ class _CreateJobPageState extends State<CreateJobPage> {
 
   // 状态
   bool _submitting = false;
+  bool _counting = false;
+
+  // 计费配置（从服务端读取）
+  int _billingUnitChars = 1000;
+  int _billingUnitCost = 1;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBillingConfig();
+  }
+
+  Future<void> _loadBillingConfig() async {
+    try {
+      final cfg = await _api.getConfig();
+      if (mounted) {
+        setState(() {
+          _billingUnitChars = (cfg['billing_unit_chars'] ?? 1000) as int;
+          _billingUnitCost = (cfg['billing_unit_cost'] ?? 1) as int;
+        });
+      }
+    } catch (_) {}
+  }
 
   static const _languages = [
     ('auto', '自动检测'),
     ('zh', '简体中文'),
     ('zh-tw', '繁体中文'),
-    ('en', 'English'),
-    ('ja', '日本語'),
-    ('ko', '한국어'),
-    ('fr', 'Français'),
-    ('de', 'Deutsch'),
-    ('es', 'Español'),
-    ('ru', 'Русский'),
-    ('pt', 'Português'),
-    ('it', 'Italiano'),
-    ('ar', 'العربية'),
-    ('th', 'ไทย'),
-    ('vi', 'Tiếng Việt'),
+    ('en', '英语'),
+    ('ja', '日语'),
+    ('ko', '韩语'),
+    ('fr', '法语'),
+    ('de', '德语'),
+    ('es', '西班牙语'),
+    ('ru', '俄语'),
+    ('pt', '葡萄牙语'),
+    ('it', '意大利语'),
+    ('ar', '阿拉伯语'),
+    ('th', '泰语'),
+    ('vi', '越南语'),
   ];
 
   // 目标语言不包含 auto
@@ -58,7 +82,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
 
   int get _estimatedPoints {
     if (_engineType != 'AI' || _charCount <= 0) return 0;
-    return (_charCount / 1000).ceil();
+    return (_charCount / _billingUnitChars).ceil() * _billingUnitCost;
   }
 
   Future<void> _pickFile() async {
@@ -72,9 +96,22 @@ class _CreateJobPageState extends State<CreateJobPage> {
       setState(() {
         _fileName = file.name;
         _fileBytes = file.bytes;
-        // 粗略估算字数：EPUB 压缩后大小 * 3 (解压比) / 4 (HTML标签占比) / 2 (utf8平均字节)
-        _charCount = (file.size * 3 / 4 / 2).round().clamp(1000, 10000000);
+        _charCount = 0;
+        _counting = true;
       });
+      // 精确计算：解压 EPUB 提取 HTML 纯文本字数 + 封面
+      final bytes = file.bytes;
+      if (bytes != null) {
+        final count = EpubCharCounter.countChars(bytes);
+        if (mounted) {
+          setState(() {
+            _charCount = count.clamp(100, 10000000);
+            _counting = false;
+          });
+        }
+      } else {
+        if (mounted) setState(() => _counting = false);
+      }
     }
   }
 
@@ -195,7 +232,9 @@ class _CreateJobPageState extends State<CreateJobPage> {
                     ),
                     if (_fileName == null)
                       Text('支持 EPUB 格式', style: TextStyle(fontSize: 13, color: cs.outlineVariant)),
-                    if (_fileName != null)
+                    if (_fileName != null && _counting)
+                      Text('正在计算字数...', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+                    if (_fileName != null && !_counting)
                       Text('约 ${fmt.format(_charCount)} 字', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
                   ],
                 ),
@@ -289,14 +328,14 @@ class _CreateJobPageState extends State<CreateJobPage> {
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(12),
-                  color: cs.primaryContainer.withOpacity(0.3),
+                  color: cs.primaryContainer.withValues(alpha: 0.3),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text('费用预估', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: cs.onSurface)),
                     const SizedBox(height: 8),
-                    Text('📊 ${fmt.format(_charCount)} 字 × 1积分/1000字', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+                    Text('\ud83d\udcca ${fmt.format(_charCount)} \u5b57 \u00d7 $_billingUnitCost\u79ef\u5206/${fmt.format(_billingUnitChars)}\u5b57', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
                     Text('💰 预计消耗: ${fmt.format(_estimatedPoints)} 积分', style: TextStyle(fontSize: 13, color: cs.primary, fontWeight: FontWeight.w500)),
                   ],
                 ),
@@ -309,7 +348,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
               onPressed: _submitting ? null : _submit,
               child: _submitting
                   ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Text('🚀 开始翻译'),
+                  : const Text('开始翻译'),
             ),
             const SizedBox(height: 32),
           ],
@@ -332,7 +371,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
     required ValueChanged<T?> onChanged,
   }) {
     return DropdownButtonFormField<T>(
-      value: value,
+      initialValue: value,
       items: items,
       onChanged: onChanged,
       decoration: InputDecoration(

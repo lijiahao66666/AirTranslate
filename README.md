@@ -15,52 +15,109 @@
 
 ```
 AirTranslate/
-├── app.js              # SCF 网关 (腾讯云 Serverless)
-├── worker/             # Python 翻译 Worker (本地运行)
-│   ├── worker.py       # COS 队列轮询 + 任务处理
+├── app.js              # 服务端 (轻量服务器, 端口 9001)
+├── data/               # 本地数据 (积分/任务/进度/队列)
+├── worker/             # Python 翻译 Worker (本地 GPU 机器)
+│   ├── worker.py       # 通过服务端 API 获取队列/更新进度
 │   ├── translators.py  # 翻译引擎 (AI + 机器翻译)
 │   └── epub_util.py    # EPUB 解析/打包
 ├── flutter_app/        # Flutter 客户端 App
 ├── models/             # HY-MT1.5-7B-FP8 模型文件
-└── scripts/            # 部署脚本
+└── scripts/            # 启动/停止脚本
 ```
 
 ### 工作流程
 
-1. **Flutter App** → 调用 SCF 网关创建翻译任务，上传 EPUB 到 COS
-2. **SCF 网关** (`app.js`) → 管理任务、积分计费、COS presign URL
-3. **Python Worker** → 轮询 COS 队列，下载 EPUB，翻译，上传结果
-4. **Flutter App** → 轮询进度，翻译完成后下载
+1. **Flutter App** → 调用服务端创建翻译任务，通过 COS presign URL 上传 EPUB
+2. **服务端** (`app.js`) → 管理任务/积分/队列（本地文件），生成 COS presign URL
+3. **Python Worker** → 通过服务端 API 获取任务，通过 presign URL 下载/上传 EPUB
+4. **Flutter App** → 轮询进度，翻译完成后通过 presign URL 下载
+
+### 数据存储
+
+| 数据 | 存储位置 | 说明 |
+|------|---------|------|
+| 积分/卡密 | 服务器本地 `data/` | JSON 文件，和 AirRead 架构一致 |
+| 任务/进度/队列 | 服务器本地 `data/` | JSON 文件 |
+| EPUB 源文件 | 腾讯云 COS | presign URL 直传 |
+| EPUB 结果文件 | 腾讯云 COS | presign URL 直传 |
+| 术语表 | 腾讯云 COS | presign URL 直传 |
 
 ## 环境要求
 
+### 服务端 (轻量服务器)
+- **规格**: 2核 2GB 即可
+- **Node.js**: 16+
+- **PM2**: 进程管理
+
+### Worker (本地 GPU 机器)
 - **GPU**: NVIDIA 显卡，显存 ≥ 16GB（如 RTX 4060 Ti 16GB）
 - **系统**: Windows 10/11
 - **Python**: 3.11+
-- **NVIDIA 驱动**: 最新版本
 
-> 不需要 Docker、WSL2 或 vLLM。模型通过 transformers 直接在 Windows 原生 Python 中加载到 GPU。
+> 不需要 Docker、WSL2 或 vLLM。模型通过 transformers 直接加载到 GPU。
 
-## 快速开始
+## 服务端部署
+
+### 1. 配置服务端 .env
+
+```bash
+cp .env.example .env
+```
+
+```env
+PORT=9001
+COS_BUCKET=translate-1256643821
+COS_REGION=ap-guangzhou
+TENCENT_SECRET_ID=你的SecretId
+TENCENT_SECRET_KEY=你的SecretKey
+COS_PREFIX=translate/
+WORKER_API_KEY=你的Worker密钥(可选)
+LICENSE_PUBLIC_KEY=卡密公钥(可选)
+```
+
+### 2. 上传到服务器
+
+```bash
+# 上传 app.js 和 .env
+scp app.js root@air-inc.top:/www/airtranslate/app.js
+scp .env root@air-inc.top:/www/airtranslate/.env
+
+# SSH 到服务器启动
+ssh root@air-inc.top
+cd /www/airtranslate
+pm2 start app.js --name airtranslate
+pm2 save
+```
+
+### 3. 宝塔反向代理
+
+`translate-api.air-inc.top` → `http://127.0.0.1:9001`
+
+### 4. 验证
+
+```bash
+curl http://air-inc.top:9001/health
+# {"status":"ok","service":"AirTranslate",...}
+```
+
+## Worker 配置
 
 ### 1. 下载模型
 
 从 HuggingFace 下载 [HY-MT1.5-7B-FP8](https://huggingface.co/tencent/HY-MT1.5-7B-FP8) 到 `models/` 目录。
 
-### 2. 配置环境变量
+### 2. 配置 Worker .env
 
 ```powershell
 cp worker\.env.example worker\.env
 ```
 
-编辑 `worker\.env`，填入腾讯云 COS 密钥：
-
 ```env
-COS_SECRET_ID=your_secret_id
-COS_SECRET_KEY=your_secret_key
-COS_BUCKET=your-bucket-1256643821
-COS_REGION=ap-guangzhou
+SERVER_URL=https://translate-api.air-inc.top
+WORKER_API_KEY=和服务端一致
 MODEL_PATH=../models
+POLL_INTERVAL_SEC=10
 ```
 
 ### 3. 启动 Worker
@@ -68,8 +125,6 @@ MODEL_PATH=../models
 ```powershell
 .\scripts\start.ps1
 ```
-
-首次运行会自动创建虚拟环境并安装依赖（torch + transformers，需要几分钟）。
 
 ### 4. 停止 Worker
 
@@ -86,22 +141,34 @@ MODEL_PATH=../models
 | MyMemory | 机器 | 免费 | 开源翻译记忆库，国内可直接访问 |
 | Google Translate | 机器 | 免费 | ⚠️ 国内需 VPN，作为最后退避选项 |
 
-## SCF 网关 API
+## 服务端 API
+
+### App 接口
 
 | 路由 | 说明 |
 |------|------|
+| `GET /health` | 健康检查 |
 | `POST /jobs/create` | 创建翻译任务 |
-| `POST /jobs/markUploaded` | 标记 EPUB 上传完成 |
-| `GET /jobs/progress` | 查询任务进度 |
-| `GET /jobs/download` | 获取结果下载 URL |
-| `GET /jobs/list` | 获取用户任务列表 |
+| `POST /jobs/markUploaded` | 标记上传完成，加入队列 |
+| `GET /jobs/progress?jobId=` | 查询任务进度 |
+| `GET /jobs/download?jobId=` | 获取结果下载 URL |
+| `GET /jobs/list?deviceId=` | 用户任务列表 |
 | `POST /billing/redeem` | 兑换积分卡密 |
-| `GET /billing/balance` | 查询积分余额 |
+| `GET /billing/balance?deviceId=` | 查询积分余额 |
+
+### Worker 内部接口 (X-Worker-Key 认证)
+
+| 路由 | 说明 |
+|------|------|
+| `GET /worker/poll` | 获取下一个待处理任务 + COS presign URLs |
+| `POST /worker/progress` | 更新任务进度 |
+| `POST /worker/complete` | 标记任务完成 |
+| `POST /worker/fail` | 标记任务失败（自动退积分） |
 
 ## 技术栈
 
-- **SCF 网关**: Node.js + 腾讯云 SCF + COS
+- **服务端**: Node.js (轻量服务器, PM2)
 - **Worker**: Python 3.11 + transformers + PyTorch + BeautifulSoup
 - **AI 模型**: HY-MT1.5-7B-FP8 (腾讯混元翻译 v1.5)
 - **客户端**: Flutter (Material 3)
-- **存储**: 腾讯云 COS（任务数据、EPUB、积分）
+- **存储**: 本地文件系统 (积分/任务) + 腾讯云 COS (EPUB文件)

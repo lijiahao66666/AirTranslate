@@ -1,16 +1,81 @@
 'use strict';
 
 // =========================================================================
-// AirTranslate SCF Gateway (v3 - simplified)
-// - 只保留 App 面向的 API
-// - 删除所有 /worker/* 路由 (Worker 直连 COS)
-// - 引擎类型: MACHINE (免费) / AI (扣积分)
-// - 创建任务时直接排队 + 预扣积分(AI)
+// AirTranslate Server (v4 - local filesystem)
+// - 积分/卡密/任务/进度/队列: 本地文件系统 ./data/
+// - COS: 仅用于 presign URL (EPUB 上传/下载/术语表)
+// - /jobs/*    : App 面向的 API
+// - /billing/* : 积分/卡密 API
+// - /worker/*  : Worker 内部 API (获取队列/更新进度/完成/失败)
+// - 端口 9001 (避免和 AirRead 的 9000 冲突)
 // =========================================================================
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const http = require('http');
 const https = require('https');
+
+// ---------------------------------------------------------------------------
+// 加载 .env 文件 (零依赖)
+// ---------------------------------------------------------------------------
+
+(function loadEnv() {
+  const envPath = path.join(__dirname, '.env');
+  if (!fs.existsSync(envPath)) return;
+  const lines = fs.readFileSync(envPath, 'utf8').split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx <= 0) continue;
+    const key = trimmed.slice(0, idx).trim();
+    let val = trimmed.slice(idx + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    if (!process.env[key]) process.env[key] = val;
+  }
+})();
+
+// ---------------------------------------------------------------------------
+// 数据目录初始化
+// ---------------------------------------------------------------------------
+
+const DATA_DIR = path.join(__dirname, 'data');
+const DIRS = {
+  points:   path.join(DATA_DIR, 'points'),
+  usedKeys: path.join(DATA_DIR, 'used_keys'),
+  jobs:     path.join(DATA_DIR, 'jobs'),
+  queue:    path.join(DATA_DIR, 'queue'),
+};
+
+for (const dir of Object.values(DIRS)) {
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+// ---------------------------------------------------------------------------
+// 本地文件辅助
+// ---------------------------------------------------------------------------
+
+function readJsonFile(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeJsonFile(filePath, obj) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(obj, null, 2), 'utf8');
+}
+
+function fileExists(filePath) {
+  return fs.existsSync(filePath);
+}
 
 // ---------------------------------------------------------------------------
 // 通用工具
@@ -50,8 +115,23 @@ function verifyEd25519(data, signature, publicKey) {
 }
 
 // ---------------------------------------------------------------------------
-// COS 底层操作 (保持不变)
+// COS presign 相关 (仅用于生成签名 URL, 不做数据存储)
 // ---------------------------------------------------------------------------
+
+function getCosConfig() {
+  const bucket = (process.env.COS_BUCKET || '').trim();
+  const region = (process.env.COS_REGION || '').trim();
+  const cosPrefix = String(process.env.COS_PREFIX || 'translate/').trim() || 'translate/';
+  const presignSeconds = Number(process.env.COS_PRESIGN_EXPIRES_SECONDS || '7200') || 7200;
+  return { bucket, region, cosPrefix, presignSeconds };
+}
+
+function getCosCredentials() {
+  const secretId = (process.env.TENCENT_SECRET_ID || process.env.COS_SECRET_ID || '').trim();
+  const secretKey = (process.env.TENCENT_SECRET_KEY || process.env.COS_SECRET_KEY || '').trim();
+  const sessionToken = (process.env.COS_SESSION_TOKEN || '').trim();
+  return { secretId, secretKey, sessionToken };
+}
 
 function buildCosAuthorization({ secretId, secretKey, method, path, headers, query, startTime, endTime }) {
   const signTime = `${startTime};${endTime}`;
@@ -72,95 +152,30 @@ function buildCosPath(key) {
   return '/' + String(key || '').split('/').map((seg) => encodeURIComponent(seg)).join('/');
 }
 
-function getCosConfig() {
-  const bucket = (process.env.BUCKET_NAME || process.env.COS_BUCKET_NAME || process.env.COS_BUCKET || '').trim();
-  const region = (process.env.REGION || process.env.COS_REGION || '').trim();
-  const jobsPrefix = String(process.env.COS_JOBS_PREFIX || 'jobs/').trim() || 'jobs/';
-  const presignSeconds = Number(process.env.COS_PRESIGN_EXPIRES_SECONDS || '7200') || 7200;
-  return { bucket, region, jobsPrefix, presignSeconds };
-}
-
-function buildKey(relativeKey) {
-  const { jobsPrefix } = getCosConfig();
-  let prefix = String(jobsPrefix || 'jobs/').trim();
+function buildCosKey(relativeKey) {
+  const { cosPrefix } = getCosConfig();
+  let prefix = cosPrefix;
   if (!prefix.endsWith('/')) prefix += '/';
   let rel = String(relativeKey || '');
   if (rel.startsWith('/')) rel = rel.slice(1);
   return prefix + rel;
 }
 
-function getCosCredentials() {
-  const secretId = (process.env.TENCENT_SECRET_ID || process.env.COS_SECRET_ID || process.env.TENCENTCLOUD_SECRETID || '').trim();
-  const secretKey = (process.env.TENCENT_SECRET_KEY || process.env.COS_SECRET_KEY || process.env.TENCENTCLOUD_SECRETKEY || '').trim();
-  const sessionToken = (process.env.COS_SESSION_TOKEN || process.env.TENCENTCLOUD_SESSIONTOKEN || '').trim();
-  return { secretId, secretKey, sessionToken };
-}
-
-function cosRequest({ method, bucket, region, key, headers, query, body }) {
+function cosPresignUrl({ method, key, expiresSeconds, headers, query }) {
+  const { bucket, region } = getCosConfig();
   const { secretId, secretKey, sessionToken } = getCosCredentials();
-  if (!secretId || !secretKey) return Promise.reject(new Error('Missing COS credentials'));
+  if (!secretId || !secretKey || !bucket || !region) throw new Error('Missing COS config');
   const host = `${bucket}.cos.${region}.myqcloud.com`;
-  const path = buildCosPath(key);
+  const cosPath = buildCosPath(key);
   const finalHeaders = Object.assign({}, headers || {});
   finalHeaders.host = host;
-  if (sessionToken) finalHeaders['x-cos-security-token'] = sessionToken;
+  const finalQuery = Object.assign({}, query || {});
   const now = Math.floor(Date.now() / 1000);
-  finalHeaders.Authorization = buildCosAuthorization({ secretId, secretKey, method, path, headers: finalHeaders, query: query || {}, startTime: now - 60, endTime: now + 600 });
-  const queryKeys = Object.keys(query || {});
-  const qs = queryKeys.length ? `?${queryKeys.map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(String(query[k] ?? ''))}`).join('&')}` : '';
-  const options = { protocol: 'https:', hostname: host, method, path: path + qs, headers: finalHeaders };
-  return new Promise((resolve, reject) => {
-    const req = https.request(options, (resp) => {
-      const chunks = [];
-      resp.on('data', (c) => chunks.push(c));
-      resp.on('end', () => resolve({ statusCode: resp.statusCode || 0, headers: resp.headers || {}, body: Buffer.concat(chunks) }));
-    });
-    req.on('error', reject);
-    if (body && body.length) req.write(body);
-    req.end();
-  });
-}
-
-async function cosHeadObject({ bucket, region, key }) {
-  const resp = await cosRequest({ method: 'HEAD', bucket, region, key, headers: {}, query: {}, body: null });
-  return resp.statusCode || 0;
-}
-
-async function cosPutObject({ bucket, region, key, headers }) {
-  const body = Buffer.from('');
-  const resp = await cosRequest({ method: 'PUT', bucket, region, key, headers: Object.assign({ 'content-length': '0' }, headers || {}), query: {}, body });
-  return resp.statusCode || 0;
-}
-
-async function cosGetObject({ bucket, region, key }) {
-  const resp = await cosRequest({ method: 'GET', bucket, region, key, headers: {}, query: {}, body: null });
-  if ((resp.statusCode || 0) !== 200) throw new Error(`COS GET ${key} status=${resp.statusCode || 0}`);
-  return resp.body || Buffer.from('');
-}
-
-async function cosPutJson({ bucket, region, key, json }) {
-  const body = Buffer.from(JSON.stringify(json));
-  const resp = await cosRequest({ method: 'PUT', bucket, region, key, headers: { 'content-length': String(body.length), 'content-type': 'application/json; charset=utf-8' }, query: {}, body });
-  return resp.statusCode || 0;
-}
-
-async function cosListObjectsV2({ bucket, region, prefix, maxKeys }) {
-  const resp = await cosRequest({ method: 'GET', bucket, region, key: '', headers: {}, query: { 'list-type': '2', prefix: String(prefix || ''), 'max-keys': String(maxKeys || 1000) }, body: null });
-  if ((resp.statusCode || 0) !== 200) throw new Error(`COS ListObjectsV2 status=${resp.statusCode || 0}`);
-  return resp.body ? resp.body.toString('utf8') : '';
-}
-
-function cosPresignUrl({ method, bucket, region, key, expiresSeconds, headers }) {
-  const { secretId, secretKey, sessionToken } = getCosCredentials();
-  if (!secretId || !secretKey) throw new Error('Missing COS credentials');
-  const host = `${bucket}.cos.${region}.myqcloud.com`;
-  const path = buildCosPath(key);
-  const finalHeaders = Object.assign({}, headers || {});
-  finalHeaders.host = host;
-  const now = Math.floor(Date.now() / 1000);
-  const sign = buildCosAuthorization({ secretId, secretKey, method, path, headers: finalHeaders, query: {}, startTime: now - 60, endTime: now + Math.max(60, Math.min(86400, Number(expiresSeconds) || 7200)) });
+  const sign = buildCosAuthorization({ secretId, secretKey, method, path: cosPath, headers: finalHeaders, query: finalQuery, startTime: now - 60, endTime: now + Math.max(60, Math.min(86400, Number(expiresSeconds) || 7200)) });
   const tokenPart = sessionToken ? `&x-cos-security-token=${encodeURIComponent(sessionToken)}` : '';
-  return `https://${host}${path}?${sign}${tokenPart}`;
+  const extraQuery = Object.keys(finalQuery).map(k => `${encodeURIComponent(k)}=${encodeURIComponent(finalQuery[k])}`).join('&');
+  const extraPart = extraQuery ? `&${extraQuery}` : '';
+  return `https://${host}${cosPath}?${sign}${tokenPart}${extraPart}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,39 +211,190 @@ function normalizeEngineType(engine) {
 }
 
 // ---------------------------------------------------------------------------
-// 积分管理
+// Worker 密钥验证
 // ---------------------------------------------------------------------------
 
-const UNIT_CHARS = Number(process.env.BILLING_UNIT_CHARS || '1000') || 1000;
-const UNIT_COST = Number(process.env.BILLING_UNIT_COST || '1') || 1;
-
-async function readPointsBalance({ bucket, region, deviceId }) {
-  const key = buildKey(`_billing/points/${deviceId}.json`);
-  try {
-    const buf = await cosGetObject({ bucket, region, key });
-    const obj = JSON.parse(buf.toString('utf8'));
-    const prev = Number(obj && obj.balance ? obj.balance : 0) || 0;
-    return prev < 0 ? 0 : prev;
-  } catch (_) {
-    return 0;
-  }
+function verifyWorkerKey(req) {
+  const key = (process.env.WORKER_API_KEY || '').trim();
+  if (!key) return true; // 未配置则跳过
+  const header = (req.headers['x-worker-key'] || '').trim();
+  return header === key;
 }
 
-async function writePointsBalance({ bucket, region, deviceId, balance }) {
-  const key = buildKey(`_billing/points/${deviceId}.json`);
-  const next = balance < 0 ? 0 : balance;
-  const status = await cosPutJson({ bucket, region, key, json: { balance: next, updatedAt: new Date().toISOString() } });
-  if (status < 200 || status >= 300) throw new Error(`COS Put Points Error: ${status}`);
-  return next;
+// ---------------------------------------------------------------------------
+// 远程配置 (config.json)
+// ---------------------------------------------------------------------------
+
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+const DEFAULT_CONFIG = {
+  checkin_enabled: true,
+  checkin_points: 5000,
+  initial_grant_points: 500000,
+  billing_unit_chars: 1000,
+  billing_unit_cost: 1,
+  latest_version: '1.0.0',
+  min_version: '1.0.0',
+  update_url: '',
+  announcement: '',
+};
+
+function loadConfig() {
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      const saved = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+      return { ...DEFAULT_CONFIG, ...saved };
+    }
+  } catch (e) {
+    console.error('[config] Failed to load config.json:', e.message);
+  }
+  return DEFAULT_CONFIG;
+}
+
+if (!fs.existsSync(CONFIG_FILE)) {
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2), 'utf-8');
+  console.log('[config] Created default ' + CONFIG_FILE);
+}
+
+// ---------------------------------------------------------------------------
+// 启动迁移：清理 job.json 中的 coverImage 字段（体积过大导致 API 超时）
+// ---------------------------------------------------------------------------
+try {
+  const jobDirs = fs.existsSync(DIRS.jobs) ? fs.readdirSync(DIRS.jobs) : [];
+  let cleaned = 0;
+  for (const jobId of jobDirs) {
+    const jobFile = path.join(DIRS.jobs, jobId, 'job.json');
+    try {
+      if (!fs.existsSync(jobFile)) continue;
+      const raw = fs.readFileSync(jobFile, 'utf-8');
+      if (!raw.includes('coverImage')) continue;
+      const obj = JSON.parse(raw);
+      if (obj.coverImage) {
+        delete obj.coverImage;
+        fs.writeFileSync(jobFile, JSON.stringify(obj, null, 2), 'utf-8');
+        cleaned++;
+      }
+    } catch (_) {}
+  }
+  if (cleaned > 0) console.log(`[migrate] Stripped coverImage from ${cleaned} job(s)`);
+} catch (_) {}
+
+// ---------------------------------------------------------------------------
+// 积分管理 (本地文件)
+// ---------------------------------------------------------------------------
+
+function _readPointsData(deviceId) {
+  const filePath = path.join(DIRS.points, `${deviceId}.json`);
+  return readJsonFile(filePath) || {};
+}
+
+function _writePointsData(deviceId, obj) {
+  const filePath = path.join(DIRS.points, `${deviceId}.json`);
+  obj.updatedAt = new Date().toISOString();
+  writeJsonFile(filePath, obj);
+}
+
+function readPointsBalance(deviceId) {
+  const data = _readPointsData(deviceId);
+  const balance = Number(data.balance || 0);
+  return balance < 0 ? 0 : balance;
+}
+
+function writePointsBalance(deviceId, balance) {
+  const data = _readPointsData(deviceId);
+  data.balance = balance < 0 ? 0 : balance;
+  _writePointsData(deviceId, data);
+  return data.balance;
+}
+
+function ensureInitialGrant(deviceId) {
+  const data = _readPointsData(deviceId);
+  if (!data.initialGranted) {
+    const cfg = loadConfig();
+    data.balance = (Number(data.balance) || 0) + cfg.initial_grant_points;
+    data.initialGranted = true;
+    _writePointsData(deviceId, data);
+    console.log(`[points] initial grant ${cfg.initial_grant_points} to ${deviceId}`);
+  }
+  return Number(data.balance) || 0;
+}
+
+function doCheckin(deviceId) {
+  const today = new Date().toISOString().substring(0, 10);
+  const yesterday = new Date(Date.now() - 86400000).toISOString().substring(0, 10);
+  const data = _readPointsData(deviceId);
+
+  const lastCheckin = data.lastCheckinDate || '';
+  if (lastCheckin === today) {
+    return { points: 0, streak: data.checkinStreak || 0, alreadyDone: true, balance: Number(data.balance) || 0 };
+  }
+
+  let streak = Number(data.checkinStreak || 0);
+  streak = (lastCheckin === yesterday) ? streak + 1 : 1;
+
+  const cfg = loadConfig();
+  data.balance = (Number(data.balance) || 0) + cfg.checkin_points;
+  data.lastCheckinDate = today;
+  data.checkinStreak = streak;
+  _writePointsData(deviceId, data);
+  console.log(`[checkin] ${deviceId} +${cfg.checkin_points} streak=${streak}`);
+  return { points: cfg.checkin_points, streak, alreadyDone: false, balance: data.balance };
+}
+
+// ---------------------------------------------------------------------------
+// 任务管理 (本地文件)
+// ---------------------------------------------------------------------------
+
+function getJobDir(jobId) {
+  return path.join(DIRS.jobs, jobId);
+}
+
+function readJobSpec(jobId) {
+  return readJsonFile(path.join(getJobDir(jobId), 'job.json'));
+}
+
+function writeJobSpec(jobId, spec) {
+  writeJsonFile(path.join(getJobDir(jobId), 'job.json'), spec);
+}
+
+function readProgress(jobId) {
+  return readJsonFile(path.join(getJobDir(jobId), 'progress.json'));
+}
+
+function writeProgress(jobId, progress) {
+  writeJsonFile(path.join(getJobDir(jobId), 'progress.json'), progress);
+}
+
+// ---------------------------------------------------------------------------
+// 队列管理 (本地文件: data/queue/{jobId}.json)
+// ---------------------------------------------------------------------------
+
+function enqueue(jobId) {
+  writeJsonFile(path.join(DIRS.queue, `${jobId}.json`), { jobId, enqueuedAt: new Date().toISOString() });
+}
+
+function dequeue(jobId) {
+  const filePath = path.join(DIRS.queue, `${jobId}.json`);
+  try { fs.unlinkSync(filePath); } catch (_) {}
+}
+
+function peekQueue() {
+  try {
+    const files = fs.readdirSync(DIRS.queue).filter((f) => f.endsWith('.json')).sort();
+    if (files.length === 0) return null;
+    const data = readJsonFile(path.join(DIRS.queue, files[0]));
+    return data ? data.jobId : files[0].replace('.json', '');
+  } catch (_) {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
 // API: POST /jobs/create
 // ---------------------------------------------------------------------------
 
-async function handleCreateJob(res, body) {
-  const { bucket, region, presignSeconds } = getCosConfig();
-  if (!bucket || !region) return sendJson(res, 500, { error: 'ServerMisconfiguration' });
+function handleCreateJob(res, body) {
+  const { bucket, region } = getCosConfig();
+  if (!bucket || !region) return sendJson(res, 500, { error: 'ServerMisconfiguration', message: 'COS not configured' });
 
   const engineType = normalizeEngineType(body.engineType || body.engine);
   const output = normalizeOutput(body.output);
@@ -247,16 +413,18 @@ async function handleCreateJob(res, body) {
   // AI翻译: 预扣积分
   let pointsDeducted = 0;
   if (engineType === 'AI' && charCount > 0) {
-    pointsDeducted = Math.ceil(charCount / UNIT_CHARS) * UNIT_COST;
-    const balance = await readPointsBalance({ bucket, region, deviceId });
+    const cfg = loadConfig();
+    pointsDeducted = Math.ceil(charCount / cfg.billing_unit_chars) * cfg.billing_unit_cost;
+    const balance = readPointsBalance(deviceId);
     if (balance < pointsDeducted) {
       return sendJson(res, 409, { error: 'POINTS_INSUFFICIENT', need: pointsDeducted, balance });
     }
-    await writePointsBalance({ bucket, region, deviceId, balance: balance - pointsDeducted });
+    writePointsBalance(deviceId, balance - pointsDeducted);
   }
 
   const jobId = crypto.randomBytes(16).toString('hex');
   const nowIso = new Date().toISOString();
+  const { presignSeconds } = getCosConfig();
 
   const spec = {
     jobId, engineType, output, deviceId, sourceLang, targetLang,
@@ -265,26 +433,18 @@ async function handleCreateJob(res, body) {
   };
   const progress = { jobId, state: 'CREATED', percent: 0, engineType, output, updatedAt: nowIso };
 
-  const st1 = await cosPutJson({ bucket, region, key: buildKey(`${jobId}/job.json`), json: spec });
-  const st2 = await cosPutJson({ bucket, region, key: buildKey(`${jobId}/progress.json`), json: progress });
-  if (st1 < 200 || st1 >= 300 || st2 < 200 || st2 >= 300) {
-    // 回退积分
-    if (pointsDeducted > 0) {
-      const cur = await readPointsBalance({ bucket, region, deviceId });
-      await writePointsBalance({ bucket, region, deviceId, balance: cur + pointsDeducted });
-    }
-    return sendJson(res, 500, { error: 'CosWriteFailed' });
-  }
+  writeJobSpec(jobId, spec);
+  writeProgress(jobId, progress);
 
-  // 生成上传 presign URL
-  const sourceKey = buildKey(`${jobId}/source/source.epub`);
-  const uploadUrl = cosPresignUrl({ method: 'PUT', bucket, region, key: sourceKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
+  // 生成 COS presign URL (EPUB 上传)
+  const sourceKey = buildCosKey(`${jobId}/source.epub`);
+  const uploadUrl = cosPresignUrl({ method: 'PUT', key: sourceKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
 
   // 术语表上传 URL (AI + useGlossary)
   let glossaryUpload = null;
   if (engineType === 'AI' && useGlossary) {
-    const glossaryKey = buildKey(`${jobId}/glossary.json`);
-    const glossaryUrl = cosPresignUrl({ method: 'PUT', bucket, region, key: glossaryKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/json' } });
+    const glossaryKey = buildCosKey(`${jobId}/glossary.json`);
+    const glossaryUrl = cosPresignUrl({ method: 'PUT', key: glossaryKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/json' } });
     glossaryUpload = { cosKey: glossaryKey, url: glossaryUrl, method: 'PUT', contentType: 'application/json' };
   }
 
@@ -300,29 +460,19 @@ async function handleCreateJob(res, body) {
 // API: POST /jobs/markUploaded  (App上传完EPUB后调用，排队)
 // ---------------------------------------------------------------------------
 
-async function handleMarkUploaded(res, body) {
-  const { bucket, region } = getCosConfig();
-  if (!bucket || !region) return sendJson(res, 500, { error: 'ServerMisconfiguration' });
+function handleMarkUploaded(res, body) {
   const jobId = String(body.jobId || '').trim();
   if (!jobId) return sendJson(res, 400, { error: 'BadRequest', message: 'jobId required' });
 
-  const progressKey = buildKey(`${jobId}/progress.json`);
-  let progress;
-  try {
-    const buf = await cosGetObject({ bucket, region, key: progressKey });
-    progress = JSON.parse(buf.toString('utf8'));
-  } catch (e) {
-    return sendJson(res, 404, { error: 'NotFound' });
-  }
+  const progress = readProgress(jobId);
+  if (!progress) return sendJson(res, 404, { error: 'NotFound' });
+
   progress.state = 'UPLOADED';
   progress.updatedAt = new Date().toISOString();
-  const st = await cosPutJson({ bucket, region, key: progressKey, json: progress });
-  if (st < 200 || st >= 300) return sendJson(res, 500, { error: 'CosWriteFailed' });
+  writeProgress(jobId, progress);
 
   // 加入队列
-  const queueKey = buildKey(`_queue/pending/${jobId}`);
-  const qst = await cosPutObject({ bucket, region, key: queueKey, headers: {} });
-  if (qst < 200 || qst >= 300) return sendJson(res, 500, { error: 'CosQueueFailed' });
+  enqueue(jobId);
 
   return sendJson(res, 200, { ok: true });
 }
@@ -331,32 +481,22 @@ async function handleMarkUploaded(res, body) {
 // API: GET /jobs/progress
 // ---------------------------------------------------------------------------
 
-async function handleGetProgress(res, jobId) {
-  const { bucket, region } = getCosConfig();
-  if (!bucket || !region) return sendJson(res, 500, { error: 'ServerMisconfiguration' });
+function handleGetProgress(res, jobId) {
   if (!jobId) return sendJson(res, 400, { error: 'BadRequest', message: 'jobId required' });
 
-  let progress;
-  try {
-    const buf = await cosGetObject({ bucket, region, key: buildKey(`${jobId}/progress.json`) });
-    progress = JSON.parse(buf.toString('utf8'));
-  } catch (e) {
-    return sendJson(res, 404, { error: 'NotFound' });
-  }
+  const progress = readProgress(jobId);
+  if (!progress) return sendJson(res, 404, { error: 'NotFound' });
 
   // 失败时自动退还积分
   if (progress.state === 'FAILED' && !progress._refunded) {
-    try {
-      const jobBuf = await cosGetObject({ bucket, region, key: buildKey(`${jobId}/job.json`) });
-      const job = JSON.parse(jobBuf.toString('utf8'));
-      if (job.pointsDeducted > 0 && job.deviceId) {
-        const cur = await readPointsBalance({ bucket, region, deviceId: job.deviceId });
-        await writePointsBalance({ bucket, region, deviceId: job.deviceId, balance: cur + job.pointsDeducted });
-        progress._refunded = true;
-        progress.refundedPoints = job.pointsDeducted;
-        await cosPutJson({ bucket, region, key: buildKey(`${jobId}/progress.json`), json: progress });
-      }
-    } catch (_) { /* best effort */ }
+    const job = readJobSpec(jobId);
+    if (job && job.pointsDeducted > 0 && job.deviceId) {
+      const cur = readPointsBalance(job.deviceId);
+      writePointsBalance(job.deviceId, cur + job.pointsDeducted);
+      progress._refunded = true;
+      progress.refundedPoints = job.pointsDeducted;
+      writeProgress(jobId, progress);
+    }
   }
 
   return sendJson(res, 200, progress);
@@ -366,60 +506,50 @@ async function handleGetProgress(res, jobId) {
 // API: GET /jobs/download
 // ---------------------------------------------------------------------------
 
-async function handleGetDownloadUrl(res, jobId, output) {
-  const { bucket, region, presignSeconds } = getCosConfig();
-  if (!bucket || !region) return sendJson(res, 500, { error: 'ServerMisconfiguration' });
+function handleGetDownloadUrl(res, jobId, output) {
   if (!jobId) return sendJson(res, 400, { error: 'BadRequest', message: 'jobId required' });
 
-  let progress;
-  try {
-    const buf = await cosGetObject({ bucket, region, key: buildKey(`${jobId}/progress.json`) });
-    progress = JSON.parse(buf.toString('utf8'));
-  } catch (e) {
-    return sendJson(res, 404, { error: 'NotFound' });
-  }
+  const progress = readProgress(jobId);
+  if (!progress) return sendJson(res, 404, { error: 'NotFound' });
   if (String(progress.state || '').toUpperCase() !== 'DONE') {
     return sendJson(res, 409, { error: 'NotReady', message: 'job not done' });
   }
 
+  const spec = readJobSpec(jobId);
+  const { presignSeconds } = getCosConfig();
   const o = normalizeOutput(output || progress.output);
-  const cosKey = o === 'BILINGUAL' ? buildKey(`${jobId}/result/bilingual.epub`) : buildKey(`${jobId}/result/translated.epub`);
-  const url = cosPresignUrl({ method: 'GET', bucket, region, key: cosKey, expiresSeconds: presignSeconds, headers: {} });
+  const cosKey = o === 'BILINGUAL' ? buildCosKey(`${jobId}/bilingual.epub`) : buildCosKey(`${jobId}/translated.epub`);
+
+  // 下载文件名: 原书名_译本.epub
+  const baseName = String(spec?.sourceFileName || 'book').replace(/\.epub$/i, '');
+  const suffix = o === 'BILINGUAL' ? '_双语译本' : '_译本';
+  const downloadName = `${baseName}${suffix}.epub`;
+  const disposition = `attachment; filename*=UTF-8''${encodeURIComponent(downloadName)}`;
+
+  const url = cosPresignUrl({ method: 'GET', key: cosKey, expiresSeconds: presignSeconds, headers: {}, query: { 'response-content-disposition': disposition } });
   return sendJson(res, 200, { cosKey, url, expiresInSeconds: presignSeconds });
 }
 
 // ---------------------------------------------------------------------------
-// API: GET /jobs/list  (新增)
+// API: GET /jobs/list
 // ---------------------------------------------------------------------------
 
-async function handleListJobs(res, deviceId) {
-  const { bucket, region } = getCosConfig();
-  if (!bucket || !region) return sendJson(res, 500, { error: 'ServerMisconfiguration' });
+function handleListJobs(res, deviceId) {
   if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
 
-  const prefix = buildKey('');
-  const xml = await cosListObjectsV2({ bucket, region, prefix, maxKeys: 500 });
-
-  // 提取所有 job.json key
-  const jobKeyRegex = /<Key>([^<]*\/job\.json)<\/Key>/g;
   const jobs = [];
-  let match;
-  while ((match = jobKeyRegex.exec(xml)) !== null) {
-    try {
-      const buf = await cosGetObject({ bucket, region, key: match[1] });
-      const job = JSON.parse(buf.toString('utf8'));
-      if (job.deviceId === deviceId) {
-        // 也读取进度
-        const progressKey = match[1].replace('/job.json', '/progress.json');
-        let progress = {};
-        try {
-          const pBuf = await cosGetObject({ bucket, region, key: progressKey });
-          progress = JSON.parse(pBuf.toString('utf8'));
-        } catch (_) {}
-        jobs.push({ ...job, progress });
+  try {
+    const dirs = fs.readdirSync(DIRS.jobs);
+    for (const jobId of dirs) {
+      const job = readJobSpec(jobId);
+      if (job && job.deviceId === deviceId) {
+        const progress = readProgress(jobId) || {};
+        // 列表接口不返回 coverImage（体积过大会导致超时）
+        const { coverImage: _, ...jobWithoutCover } = job;
+        jobs.push({ ...jobWithoutCover, progress });
       }
-    } catch (_) {}
-  }
+    }
+  } catch (_) {}
 
   // 按创建时间倒序
   jobs.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
@@ -427,25 +557,90 @@ async function handleListJobs(res, deviceId) {
 }
 
 // ---------------------------------------------------------------------------
+// API: POST /jobs/delete  — 删除/取消任务
+// ---------------------------------------------------------------------------
+
+function handleDeleteJob(res, body) {
+  const jobId = String(body.jobId || '').trim();
+  if (!jobId) return sendJson(res, 400, { error: 'BadRequest', message: 'jobId required' });
+
+  const spec = readJobSpec(jobId);
+  if (!spec) return sendJson(res, 404, { error: 'NotFound' });
+
+  const progress = readProgress(jobId) || {};
+  const state = String(progress.state || 'CREATED').toUpperCase();
+
+  // 从队列中移除
+  dequeue(jobId);
+
+  // 退还积分（仅未开始翻译的 AI 任务：CREATED / UPLOADED）
+  let refunded = 0;
+  const canRefund = (state === 'CREATED' || state === 'UPLOADED');
+  if (canRefund && spec.pointsDeducted > 0 && spec.deviceId && !progress._refunded) {
+    const cur = readPointsBalance(spec.deviceId);
+    writePointsBalance(spec.deviceId, cur + spec.pointsDeducted);
+    refunded = spec.pointsDeducted;
+    console.log(`[delete] refund ${refunded} to ${spec.deviceId} for job ${jobId}`);
+  }
+
+  // 删除任务目录
+  const jobDir = getJobDir(jobId);
+  try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch (_) {}
+
+  return sendJson(res, 200, { ok: true, refundedPoints: refunded });
+}
+
+// ---------------------------------------------------------------------------
 // API: GET /billing/balance
 // ---------------------------------------------------------------------------
 
-async function handleBalance(res, deviceId) {
-  const { bucket, region } = getCosConfig();
-  if (!bucket || !region) return sendJson(res, 500, { error: 'ServerMisconfiguration' });
+function handleBalance(res, deviceId) {
   if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
-  const balance = await readPointsBalance({ bucket, region, deviceId });
+  const balance = readPointsBalance(deviceId);
   return sendJson(res, 200, { deviceId, balance });
+}
+
+// ---------------------------------------------------------------------------
+// API: POST /billing/init  — 初始化积分（首次赠送）+ 返回余额
+// ---------------------------------------------------------------------------
+
+function handleBillingInit(res, body) {
+  const deviceId = String(body.deviceId || '').trim();
+  if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
+  const balance = ensureInitialGrant(deviceId);
+  return sendJson(res, 200, { deviceId, balance });
+}
+
+// ---------------------------------------------------------------------------
+// API: POST /checkin  — 每日签到
+// ---------------------------------------------------------------------------
+
+function handleCheckin(res, body) {
+  const deviceId = String(body.deviceId || '').trim();
+  if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
+  const result = doCheckin(deviceId);
+  return sendJson(res, 200, result);
+}
+
+// ---------------------------------------------------------------------------
+// API: POST /checkin/status  — 查询签到状态
+// ---------------------------------------------------------------------------
+
+function handleCheckinStatus(res, body) {
+  const deviceId = String(body.deviceId || '').trim();
+  if (!deviceId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
+  const data = _readPointsData(deviceId);
+  const today = new Date().toISOString().substring(0, 10);
+  const done = data.lastCheckinDate === today;
+  const streak = Number(data.checkinStreak || 0);
+  return sendJson(res, 200, { checkedInToday: done, streak });
 }
 
 // ---------------------------------------------------------------------------
 // API: POST /billing/redeem
 // ---------------------------------------------------------------------------
 
-async function handleRedeem(res, body) {
-  const { bucket, region } = getCosConfig();
-  if (!bucket || !region) return sendJson(res, 500, { error: 'ServerMisconfiguration' });
-
+function handleRedeem(res, body) {
   const licenseCode = String(body.licenseCode || body.license_code || '').trim();
   const deviceId = String(body.deviceId || body.device_id || '').trim();
   if (!licenseCode) return sendJson(res, 400, { error: 'BadRequest', message: 'licenseCode required' });
@@ -473,23 +668,158 @@ async function handleRedeem(res, body) {
 
   // 防重复兑换
   const codeHash = sha256Hex(licenseCode);
-  const usedKey = buildKey(`_billing/used_keys/${codeHash}.json`);
-  const headStatus = await cosHeadObject({ bucket, region, key: usedKey });
-  if (headStatus === 200) return sendJson(res, 409, { used: true, alreadyUsed: true, codeHash });
-  if (headStatus !== 404) return sendJson(res, 500, { error: 'CosHeadFailed', statusCode: headStatus });
-
-  const putStatus = await cosPutObject({ bucket, region, key: usedKey, headers: { 'x-cos-meta-device-id': deviceId, 'x-cos-meta-redeemed-at': new Date().toISOString() } });
-  if (putStatus < 200 || putStatus >= 300) return sendJson(res, 500, { error: 'CosWriteFailed', statusCode: putStatus });
+  const usedFile = path.join(DIRS.usedKeys, `${codeHash}.json`);
+  if (fileExists(usedFile)) {
+    return sendJson(res, 409, { used: true, alreadyUsed: true, codeHash });
+  }
+  writeJsonFile(usedFile, { deviceId, redeemedAt: new Date().toISOString() });
 
   const map = [50000, 100000, 200000, 500000, 1000000];
   const idx = pointsIndex == null ? 0 : Number(pointsIndex);
   const pointsAdded = idx >= 0 && idx < map.length ? map[idx] : 0;
   if (pointsAdded <= 0) return sendJson(res, 400, { error: 'UnsupportedPointsIndex' });
 
-  const prev = await readPointsBalance({ bucket, region, deviceId });
-  const balance = await writePointsBalance({ bucket, region, deviceId, balance: prev + pointsAdded });
+  const prev = readPointsBalance(deviceId);
+  const balance = writePointsBalance(deviceId, prev + pointsAdded);
 
   return sendJson(res, 200, { used: false, alreadyUsed: false, codeHash, pointsAdded, balance });
+}
+
+// ---------------------------------------------------------------------------
+// Worker API: GET /worker/poll  — 获取下一个待处理任务
+// ---------------------------------------------------------------------------
+
+function handleWorkerPoll(req, res) {
+  if (!verifyWorkerKey(req)) return sendJson(res, 403, { error: 'Forbidden' });
+
+  const jobId = peekQueue();
+  if (!jobId) return sendJson(res, 200, { jobId: null });
+
+  const job = readJobSpec(jobId);
+  if (!job) {
+    // 无效队列项，清除
+    dequeue(jobId);
+    return sendJson(res, 200, { jobId: null });
+  }
+
+  const progress = readProgress(jobId);
+  if (progress && (progress.state === 'DONE' || progress.state === 'CANCELED')) {
+    dequeue(jobId);
+    return sendJson(res, 200, { jobId: null });
+  }
+
+  // 生成 COS presign URL 供 Worker 下载源文件 & 上传结果
+  const { presignSeconds } = getCosConfig();
+  const sourceKey = buildCosKey(`${jobId}/source.epub`);
+  const sourceDownloadUrl = cosPresignUrl({ method: 'GET', key: sourceKey, expiresSeconds: presignSeconds, headers: {} });
+
+  const bilingualKey = buildCosKey(`${jobId}/bilingual.epub`);
+  const bilingualUploadUrl = cosPresignUrl({ method: 'PUT', key: bilingualKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
+
+  const translatedKey = buildCosKey(`${jobId}/translated.epub`);
+  const translatedUploadUrl = cosPresignUrl({ method: 'PUT', key: translatedKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
+
+  // 术语表下载 URL
+  let glossaryDownloadUrl = null;
+  if (job.engineType === 'AI' && job.useGlossary) {
+    const glossaryKey = buildCosKey(`${jobId}/glossary.json`);
+    glossaryDownloadUrl = cosPresignUrl({ method: 'GET', key: glossaryKey, expiresSeconds: presignSeconds, headers: {} });
+  }
+
+  return sendJson(res, 200, {
+    jobId,
+    job,
+    cos: {
+      sourceDownloadUrl,
+      bilingualUploadUrl,
+      translatedUploadUrl,
+      glossaryDownloadUrl,
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Worker API: POST /worker/progress  — 更新任务进度
+// ---------------------------------------------------------------------------
+
+function handleWorkerProgress(req, res, body) {
+  if (!verifyWorkerKey(req)) return sendJson(res, 403, { error: 'Forbidden' });
+
+  const jobId = String(body.jobId || '').trim();
+  if (!jobId) return sendJson(res, 400, { error: 'BadRequest', message: 'jobId required' });
+
+  const progress = readProgress(jobId);
+  if (!progress) return sendJson(res, 404, { error: 'NotFound' });
+
+  // 合并更新
+  if (body.state) progress.state = body.state;
+  if (body.percent != null) progress.percent = Number(body.percent);
+  if (body.chapterIndex != null) progress.chapterIndex = Number(body.chapterIndex);
+  if (body.chapterTotal != null) progress.chapterTotal = Number(body.chapterTotal);
+  if (body.engineType) progress.engineType = body.engineType;
+  if (body.output) progress.output = body.output;
+  progress.updatedAt = new Date().toISOString();
+
+  writeProgress(jobId, progress);
+  return sendJson(res, 200, { ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Worker API: POST /worker/complete  — 任务完成
+// ---------------------------------------------------------------------------
+
+function handleWorkerComplete(req, res, body) {
+  if (!verifyWorkerKey(req)) return sendJson(res, 403, { error: 'Forbidden' });
+
+  const jobId = String(body.jobId || '').trim();
+  if (!jobId) return sendJson(res, 400, { error: 'BadRequest', message: 'jobId required' });
+
+  const progress = readProgress(jobId);
+  if (!progress) return sendJson(res, 404, { error: 'NotFound' });
+
+  progress.state = 'DONE';
+  progress.percent = 100;
+  progress.updatedAt = new Date().toISOString();
+  writeProgress(jobId, progress);
+
+  // 从队列移除
+  dequeue(jobId);
+
+  return sendJson(res, 200, { ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Worker API: POST /worker/fail  — 任务失败
+// ---------------------------------------------------------------------------
+
+function handleWorkerFail(req, res, body) {
+  if (!verifyWorkerKey(req)) return sendJson(res, 403, { error: 'Forbidden' });
+
+  const jobId = String(body.jobId || '').trim();
+  if (!jobId) return sendJson(res, 400, { error: 'BadRequest', message: 'jobId required' });
+
+  const progress = readProgress(jobId);
+  if (!progress) return sendJson(res, 404, { error: 'NotFound' });
+
+  progress.state = 'FAILED';
+  progress.error = body.error || { code: 'JOB_FAILED', message: 'Unknown error' };
+  progress.updatedAt = new Date().toISOString();
+  writeProgress(jobId, progress);
+
+  // 从队列移除
+  dequeue(jobId);
+
+  // 自动退还积分
+  const job = readJobSpec(jobId);
+  if (job && job.pointsDeducted > 0 && job.deviceId) {
+    const cur = readPointsBalance(job.deviceId);
+    writePointsBalance(job.deviceId, cur + job.pointsDeducted);
+    progress._refunded = true;
+    progress.refundedPoints = job.pointsDeducted;
+    writeProgress(jobId, progress);
+  }
+
+  return sendJson(res, 200, { ok: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -500,7 +830,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,accept');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,accept,x-worker-key,x-device-id');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     res.end();
     return;
@@ -509,22 +839,44 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', 'http://localhost');
   const pathname = url.pathname || '/';
 
+  // Health check
+  if (req.method === 'GET' && pathname === '/health') {
+    return sendJson(res, 200, { status: 'ok', service: 'AirTranslate', uptime: process.uptime() });
+  }
+
   let body = {};
   if (req.method === 'POST') {
     try { body = await readJsonBody(req); } catch (e) { return sendJson(res, 400, { error: 'InvalidJson', message: String(e?.message || e) }); }
   }
 
   try {
-    // --- Jobs ---
-    if (req.method === 'POST' && pathname === '/jobs/create') return await handleCreateJob(res, body);
-    if (req.method === 'POST' && pathname === '/jobs/markUploaded') return await handleMarkUploaded(res, body);
-    if (req.method === 'GET' && pathname === '/jobs/progress') return await handleGetProgress(res, String(url.searchParams.get('jobId') || '').trim());
-    if (req.method === 'GET' && pathname === '/jobs/download') return await handleGetDownloadUrl(res, String(url.searchParams.get('jobId') || '').trim(), url.searchParams.get('output'));
-    if (req.method === 'GET' && pathname === '/jobs/list') return await handleListJobs(res, String(url.searchParams.get('deviceId') || '').trim());
+    // --- Jobs (App-facing) ---
+    if (req.method === 'POST' && pathname === '/jobs/create') return handleCreateJob(res, body);
+    if (req.method === 'POST' && pathname === '/jobs/markUploaded') return handleMarkUploaded(res, body);
+    if (req.method === 'GET' && pathname === '/jobs/progress') return handleGetProgress(res, String(url.searchParams.get('jobId') || '').trim());
+    if (req.method === 'GET' && pathname === '/jobs/download') return handleGetDownloadUrl(res, String(url.searchParams.get('jobId') || '').trim(), url.searchParams.get('output'));
+    if (req.method === 'GET' && pathname === '/jobs/list') return handleListJobs(res, String(url.searchParams.get('deviceId') || '').trim());
+    if (req.method === 'POST' && pathname === '/jobs/delete') return handleDeleteJob(res, body);
 
     // --- Billing ---
-    if (req.method === 'POST' && pathname === '/billing/redeem') return await handleRedeem(res, body);
-    if (req.method === 'GET' && pathname === '/billing/balance') return await handleBalance(res, String(url.searchParams.get('deviceId') || '').trim());
+    if (req.method === 'POST' && pathname === '/billing/init') return handleBillingInit(res, body);
+    if (req.method === 'POST' && pathname === '/billing/redeem') return handleRedeem(res, body);
+    if (req.method === 'GET' && pathname === '/billing/balance') return handleBalance(res, String(url.searchParams.get('deviceId') || '').trim());
+
+    // --- Config ---
+    if (req.method === 'GET' && pathname === '/config') {
+      return sendJson(res, 200, loadConfig());
+    }
+
+    // --- Checkin ---
+    if (req.method === 'POST' && pathname === '/checkin') return handleCheckin(res, body);
+    if (req.method === 'POST' && pathname === '/checkin/status') return handleCheckinStatus(res, body);
+
+    // --- Worker (internal) ---
+    if (req.method === 'GET' && pathname === '/worker/poll') return handleWorkerPoll(req, res);
+    if (req.method === 'POST' && pathname === '/worker/progress') return handleWorkerProgress(req, res, body);
+    if (req.method === 'POST' && pathname === '/worker/complete') return handleWorkerComplete(req, res, body);
+    if (req.method === 'POST' && pathname === '/worker/fail') return handleWorkerFail(req, res, body);
   } catch (e) {
     return sendJson(res, 500, { error: 'InternalError', message: String(e?.message || e) });
   }
@@ -532,5 +884,8 @@ const server = http.createServer(async (req, res) => {
   sendJson(res, 404, { error: 'NotFound' });
 });
 
-const port = process.env.PORT ? Number(process.env.PORT) : 9000;
-server.listen(port);
+const port = process.env.PORT ? Number(process.env.PORT) : 9001;
+server.listen(port, () => {
+  console.log(`AirTranslate server listening on port ${port}`);
+  console.log(`Data directory: ${DATA_DIR}`);
+});

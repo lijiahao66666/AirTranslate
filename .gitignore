@@ -19,10 +19,24 @@ target/
 *.zip
 *.tar.gz
 *.rar
-models/
+/models/
+data/
+.env
 worker/.env
 worker/.venv/
 __pycache__/
+
+# Flutter
+flutter_app/.metadata
+flutter_app/ios/
+
+# Test artifacts
+test/*.epub
+
+# Misc
+config.json
+app.js.b64
+node_modules/
 
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*

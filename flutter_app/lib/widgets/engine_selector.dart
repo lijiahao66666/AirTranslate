@@ -15,14 +15,14 @@ class EngineSelector extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     return Row(
       children: [
-        Expanded(child: _card(context, cs, 'MACHINE', '🤖', '机器翻译', '免费 · 速度快', '适合通读')),
+        Expanded(child: _card(context, cs, 'MACHINE', Icons.translate_rounded, '机器翻译', '免费 · 速度快', '适合通读')),
         const SizedBox(width: 12),
-        Expanded(child: _card(context, cs, 'AI', '🧠', 'AI翻译', '消耗积分 · 质量更高', '支持术语/上下文')),
+        Expanded(child: _card(context, cs, 'AI', Icons.auto_awesome_rounded, 'AI翻译', '消耗积分 · 质量更高', '支持术语/上下文')),
       ],
     );
   }
 
-  Widget _card(BuildContext context, ColorScheme cs, String value, String icon, String title, String sub1, String sub2) {
+  Widget _card(BuildContext context, ColorScheme cs, String value, IconData icon, String title, String sub1, String sub2) {
     final isSelected = selected == value;
     return GestureDetector(
       onTap: () => onChanged(value),
@@ -35,12 +35,12 @@ class EngineSelector extends StatelessWidget {
             color: isSelected ? cs.primary : cs.outlineVariant,
             width: isSelected ? 2 : 1,
           ),
-          color: isSelected ? cs.primaryContainer.withOpacity(0.3) : cs.surfaceContainerLowest,
+          color: isSelected ? cs.primaryContainer.withValues(alpha: 0.3) : cs.surfaceContainerLowest,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(icon, style: const TextStyle(fontSize: 28)),
+            Icon(icon, size: 28, color: isSelected ? cs.primary : cs.onSurfaceVariant),
             const SizedBox(height: 8),
             Text(title, style: TextStyle(
               fontSize: 16, fontWeight: FontWeight.w600,

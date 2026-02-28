@@ -1,7 +1,6 @@
 """
-AirTranslate Worker
-主循环：轮询 COS 队列 → 下载 EPUB → 翻译 → 上传结果
-直接操作 COS，不经过 SCF。
+AirTranslate Worker (v4)
+主循环：通过服务端 API 获取队列/更新进度，只直连 COS 下载/上传 EPUB。
 """
 
 import json
@@ -11,11 +10,12 @@ import shutil
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
-from qcloud_cos import CosConfig, CosS3Client
+
+load_dotenv()
 
 import epub_util
 import translators
@@ -24,153 +24,166 @@ import translators
 # 配置
 # ---------------------------------------------------------------------------
 
-load_dotenv()
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
 )
 log = logging.getLogger("worker")
 
-COS_SECRET_ID = os.environ["COS_SECRET_ID"]
-COS_SECRET_KEY = os.environ["COS_SECRET_KEY"]
-COS_BUCKET = os.environ["COS_BUCKET"]
-COS_REGION = os.environ["COS_REGION"]
+SERVER_URL = os.environ.get("SERVER_URL", "http://localhost:9001").rstrip("/")
+WORKER_API_KEY = os.environ.get("WORKER_API_KEY", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SEC", "10"))
 
-config = CosConfig(
-    Region=COS_REGION,
-    SecretId=COS_SECRET_ID,
-    SecretKey=COS_SECRET_KEY,
-)
-cos = CosS3Client(config)
-
 
 # ---------------------------------------------------------------------------
-# COS 辅助函数
+# 服务端 API 辅助
 # ---------------------------------------------------------------------------
 
-def cos_get_json(key: str) -> dict | None:
-    """从 COS 读取 JSON 对象"""
+def _api_headers() -> dict:
+    """构建请求头"""
+    headers = {"Content-Type": "application/json"}
+    if WORKER_API_KEY:
+        headers["X-Worker-Key"] = WORKER_API_KEY
+    return headers
+
+
+def api_poll() -> dict | None:
+    """GET /worker/poll — 获取下一个待处理任务"""
     try:
-        resp = cos.get_object(Bucket=COS_BUCKET, Key=key)
-        body = resp["Body"].get_raw_stream().read()
-        return json.loads(body)
+        resp = httpx.get(
+            f"{SERVER_URL}/worker/poll",
+            headers=_api_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("jobId"):
+            return data
+        return None
     except Exception as e:
-        log.warning("cos_get_json(%s) failed: %s", key, e)
+        log.warning("api_poll failed: %s", e)
         return None
 
 
-def cos_put_json(key: str, data: dict) -> None:
-    """写入 JSON 对象到 COS"""
-    body = json.dumps(data, ensure_ascii=False)
-    cos.put_object(Bucket=COS_BUCKET, Key=key, Body=body.encode("utf-8"))
-
-
-def cos_download(key: str, local_path: str) -> None:
-    """从 COS 下载文件到本地"""
-    cos.download_file(Bucket=COS_BUCKET, Key=key, DestFilePath=local_path)
-
-
-def cos_upload(key: str, local_path: str) -> None:
-    """上传本地文件到 COS"""
-    cos.upload_file(Bucket=COS_BUCKET, Key=key, LocalFilePath=local_path)
-
-
-def cos_delete(key: str) -> None:
-    """删除 COS 对象"""
+def api_progress(job_id: str, **kwargs) -> None:
+    """POST /worker/progress — 更新任务进度"""
     try:
-        cos.delete_object(Bucket=COS_BUCKET, Key=key)
-    except Exception as e:
-        log.warning("cos_delete(%s) failed: %s", key, e)
-
-
-def cos_list_prefix(prefix: str) -> list[str]:
-    """列出 COS 指定前缀下的所有 key"""
-    keys = []
-    marker = ""
-    while True:
-        resp = cos.list_objects(
-            Bucket=COS_BUCKET, Prefix=prefix, Marker=marker, MaxKeys=100,
+        body = {"jobId": job_id, **kwargs}
+        resp = httpx.post(
+            f"{SERVER_URL}/worker/progress",
+            headers=_api_headers(),
+            json=body,
+            timeout=10,
         )
-        contents = resp.get("Contents", [])
-        for item in contents:
-            keys.append(item["Key"])
-        if resp.get("IsTruncated") == "true":
-            marker = resp.get("NextMarker", "")
-        else:
-            break
-    return keys
+        resp.raise_for_status()
+    except Exception as e:
+        log.warning("api_progress(%s) failed: %s", job_id, e)
+
+
+def api_complete(job_id: str) -> None:
+    """POST /worker/complete — 标记任务完成"""
+    try:
+        resp = httpx.post(
+            f"{SERVER_URL}/worker/complete",
+            headers=_api_headers(),
+            json={"jobId": job_id},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        log.warning("api_complete(%s) failed: %s", job_id, e)
+
+
+def api_fail(job_id: str, error_msg: str) -> None:
+    """POST /worker/fail — 标记任务失败"""
+    try:
+        resp = httpx.post(
+            f"{SERVER_URL}/worker/fail",
+            headers=_api_headers(),
+            json={
+                "jobId": job_id,
+                "error": {"code": "JOB_FAILED", "message": error_msg},
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        log.warning("api_fail(%s) failed: %s", job_id, e)
 
 
 # ---------------------------------------------------------------------------
-# 队列轮询
+# COS presign URL 文件操作
 # ---------------------------------------------------------------------------
 
-def poll_next_job_id() -> str | None:
-    """从 COS 队列中取出一个待处理的 job_id"""
-    keys = cos_list_prefix("jobs/_queue/pending/")
-    for key in keys:
-        # key 形如 "jobs/_queue/pending/{jobId}"
-        parts = key.split("/")
-        if len(parts) >= 4 and parts[3]:
-            return parts[3]
+def download_presign(url: str, local_path: str) -> None:
+    """通过 presign URL 下载文件"""
+    with httpx.stream("GET", url, timeout=300, follow_redirects=True) as resp:
+        resp.raise_for_status()
+        with open(local_path, "wb") as f:
+            for chunk in resp.iter_bytes(chunk_size=65536):
+                f.write(chunk)
+
+
+def upload_presign(url: str, local_path: str, content_type: str = "application/epub+zip") -> None:
+    """通过 presign URL 上传文件"""
+    file_size = os.path.getsize(local_path)
+    with open(local_path, "rb") as f:
+        resp = httpx.put(
+            url,
+            content=f,
+            headers={
+                "Content-Type": content_type,
+                "Content-Length": str(file_size),
+            },
+            timeout=300,
+        )
+        resp.raise_for_status()
+
+
+def download_glossary(url: str) -> dict | None:
+    """通过 presign URL 下载术语表 JSON"""
+    try:
+        resp = httpx.get(url, timeout=15, follow_redirects=True)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict):
+                log.info("Loaded glossary with %d entries", len(data))
+                return data
+    except Exception as e:
+        log.warning("download_glossary failed: %s", e)
     return None
-
-
-# ---------------------------------------------------------------------------
-# 进度管理
-# ---------------------------------------------------------------------------
-
-def update_progress(job_id: str, **kwargs) -> None:
-    """更新任务进度 JSON"""
-    key = f"jobs/{job_id}/progress.json"
-    progress = cos_get_json(key) or {}
-    progress.update(kwargs)
-    progress["updatedAt"] = datetime.now(timezone.utc).isoformat()
-    cos_put_json(key, progress)
 
 
 # ---------------------------------------------------------------------------
 # 任务处理
 # ---------------------------------------------------------------------------
 
-def process_job(job_id: str) -> None:
+def process_job(poll_data: dict) -> None:
     """处理单个翻译任务"""
+    job_id = poll_data["jobId"]
+    job = poll_data["job"]
+    cos_urls = poll_data["cos"]
     temp_dir = None
+
     try:
         log.info("=== Processing job %s ===", job_id)
 
-        # 读取任务规格
-        job = cos_get_json(f"jobs/{job_id}/job.json")
-        if not job:
-            log.error("Job spec not found: %s", job_id)
-            return
-
-        # 检查进度状态
-        progress = cos_get_json(f"jobs/{job_id}/progress.json") or {}
-        state = progress.get("state", "CREATED")
-        if state in ("DONE", "CANCELED"):
-            log.info("Job %s already %s, skipping", job_id, state)
-            cos_delete(f"jobs/_queue/pending/{job_id}")
-            return
-
-        engine_type = job.get("engineType", "MACHINE")  # "MACHINE" 或 "AI"
+        engine_type = job.get("engineType", "MACHINE")
         src_lang = job.get("sourceLang", "auto")
         tgt_lang = job.get("targetLang", "zh")
         output_mode = job.get("output", "BILINGUAL")
         use_context = job.get("useContext", False)
 
-        update_progress(job_id, state="PARSING", percent=1)
+        api_progress(job_id, state="PARSING", percent=1)
 
         # 创建临时目录
-        temp_dir = tempfile.mkdtemp(prefix=f"job_{job_id}_")
+        temp_dir = tempfile.mkdtemp(prefix=f"job_{job_id[:8]}_")
         source_epub = os.path.join(temp_dir, "source.epub")
         unpack_dir = os.path.join(temp_dir, "unpacked")
 
-        # 下载 EPUB
+        # 下载 EPUB (通过 presign URL)
         log.info("Downloading source EPUB...")
-        cos_download(f"jobs/{job_id}/source/source.epub", source_epub)
+        download_presign(cos_urls["sourceDownloadUrl"], source_epub)
 
         # 解压
         log.info("Unpacking EPUB...")
@@ -178,19 +191,18 @@ def process_job(job_id: str) -> None:
 
         # 加载术语表 (仅 AI 翻译)
         glossary = None
-        if engine_type == "AI":
-            glossary = _load_glossary(job_id)
+        if engine_type == "AI" and cos_urls.get("glossaryDownloadUrl"):
+            glossary = download_glossary(cos_urls["glossaryDownloadUrl"])
 
         # 查找 HTML 文件
         html_files = epub_util.find_html_files(unpack_dir)
         if not html_files:
             log.warning("No HTML files found in EPUB")
-            update_progress(job_id, state="DONE", percent=100)
-            cos_delete(f"jobs/_queue/pending/{job_id}")
+            api_complete(job_id)
             return
 
         log.info("Found %d HTML files to translate", len(html_files))
-        update_progress(
+        api_progress(
             job_id,
             state="TRANSLATING",
             percent=2,
@@ -210,13 +222,15 @@ def process_job(job_id: str) -> None:
                 log.info("  No translatable text, skipping")
                 continue
 
+            log.info("  Found %d segments to translate", len(original_texts))
+            chapter_start = time.time()
+
             # 翻译
             if engine_type == "AI":
                 ctx = context_buffer if use_context else None
                 translated_texts = translators.translate_ai(
                     original_texts, src_lang, tgt_lang, ctx, glossary,
                 )
-                # 更新上下文：取最后几段翻译结果
                 if use_context:
                     context_buffer = _update_context(context_buffer, translated_texts)
             else:
@@ -224,12 +238,16 @@ def process_job(job_id: str) -> None:
                     original_texts, src_lang, tgt_lang,
                 )
 
+            chapter_elapsed = time.time() - chapter_start
+            log.info("  Chapter %d/%d translated in %.1fs (%d segments)",
+                     chapter_num, len(html_files), chapter_elapsed, len(original_texts))
+
             # 回写
             epub_util.write_back(html_path, original_texts, translated_texts, output_mode)
 
             # 更新进度
             percent = min(99, max(3, int((chapter_num / len(html_files)) * 100)))
-            update_progress(
+            api_progress(
                 job_id,
                 state="TRANSLATING",
                 percent=percent,
@@ -239,51 +257,43 @@ def process_job(job_id: str) -> None:
 
         # 重打包
         log.info("Repacking EPUB...")
-        update_progress(job_id, state="PACKAGING", percent=99)
+        api_progress(job_id, state="PACKAGING", percent=99)
         result_epub = os.path.join(temp_dir, "result.epub")
         epub_util.zip_epub(unpack_dir, result_epub)
 
-        # 上传结果
+        # 上传结果 (通过 presign URL)
         log.info("Uploading result...")
-        update_progress(job_id, state="UPLOADING_RESULT", percent=99)
-        result_name = "bilingual.epub" if output_mode.upper() == "BILINGUAL" else "translated.epub"
-        cos_upload(f"jobs/{job_id}/result/{result_name}", result_epub)
+        api_progress(job_id, state="UPLOADING_RESULT", percent=99)
+        if output_mode.upper() == "BILINGUAL":
+            upload_presign(cos_urls["bilingualUploadUrl"], result_epub)
+        else:
+            upload_presign(cos_urls["translatedUploadUrl"], result_epub)
 
         # 完成
-        update_progress(job_id, state="DONE", percent=100)
-        cos_delete(f"jobs/_queue/pending/{job_id}")
+        api_complete(job_id)
         log.info("=== Job %s DONE ===", job_id)
 
     except Exception as e:
         log.error("Job %s FAILED: %s", job_id, e, exc_info=True)
-        try:
-            update_progress(
-                job_id,
-                state="FAILED",
-                error={"code": "JOB_FAILED", "message": str(e)},
-            )
-        except Exception:
-            pass
+        api_fail(job_id, str(e))
+
+    finally:
+        # 清理临时目录
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
 # 辅助
 # ---------------------------------------------------------------------------
 
-def _load_glossary(job_id: str) -> dict | None:
-    """从 COS 加载术语表"""
-    data = cos_get_json(f"jobs/{job_id}/glossary.json")
-    if data and isinstance(data, dict):
-        log.info("Loaded glossary with %d entries", len(data))
-        return data
-    return None
-
-
 def _update_context(current_context: str, translated_texts: list[str]) -> str:
     """更新上下文缓冲：保留最近约 500 字"""
     new_text = "\n".join(t for t in translated_texts if t)
     combined = current_context + "\n" + new_text if current_context else new_text
-    # 保留最后 500 字
     if len(combined) > 500:
         combined = combined[-500:]
     return combined
@@ -295,14 +305,13 @@ def _update_context(current_context: str, translated_texts: list[str]) -> str:
 
 def main():
     log.info("AirTranslate Worker started. Poll interval: %ds", POLL_INTERVAL)
-    log.info("COS Bucket: %s, Region: %s", COS_BUCKET, COS_REGION)
-    log.info("vLLM URL: %s", translators.VLLM_BASE_URL)
+    log.info("Server URL: %s", SERVER_URL)
 
     while True:
         try:
-            job_id = poll_next_job_id()
-            if job_id:
-                process_job(job_id)
+            poll_data = api_poll()
+            if poll_data:
+                process_job(poll_data)
             else:
                 time.sleep(POLL_INTERVAL)
         except KeyboardInterrupt:

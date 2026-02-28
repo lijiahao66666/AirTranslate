@@ -1,6 +1,6 @@
 # AirTranslate Windows 一键启动脚本
 # 用法: .\scripts\start.ps1
-# 模型通过 transformers 在 Worker 进程中直接加载到 GPU，无需 Docker/vLLM
+# Worker 通过服务端 API 获取任务，模型通过 transformers 直接加载到 GPU
 
 $ErrorActionPreference = "Stop"
 $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -15,14 +15,13 @@ $MODEL_DIR = Join-Path $ROOT "models"
 # ── 检查前置条件 ──
 if (-not (Test-Path (Join-Path $WORKER_DIR ".env"))) {
     Write-Host "  ERROR: worker/.env not found!" -ForegroundColor Red
-    Write-Host "  Copy worker/.env.example to worker/.env and fill in your COS credentials." -ForegroundColor Red
+    Write-Host "  Copy worker/.env.example to worker/.env and fill in SERVER_URL." -ForegroundColor Red
     exit 1
 }
 
 if (-not (Test-Path (Join-Path $MODEL_DIR "config.json"))) {
-    Write-Host "  ERROR: models/config.json not found!" -ForegroundColor Red
-    Write-Host "  Please download HY-MT1.5-7B-FP8 model into the models/ directory." -ForegroundColor Red
-    exit 1
+    Write-Host "  WARNING: models/config.json not found." -ForegroundColor Yellow
+    Write-Host "  AI translation won't work. Machine translation is still available." -ForegroundColor Yellow
 }
 
 # ── 检查 Python ──

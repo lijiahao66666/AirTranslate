@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../models/job.dart';
@@ -6,12 +8,14 @@ class JobCard extends StatefulWidget {
   final Job job;
   final VoidCallback? onDownload;
   final VoidCallback? onTap;
+  final VoidCallback? onDelete;
 
   const JobCard({
     super.key,
     required this.job,
     this.onDownload,
     this.onTap,
+    this.onDelete,
   });
 
   @override
@@ -40,37 +44,55 @@ class _JobCardState extends State<JobCard> {
           widget.onTap?.call();
         },
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(12),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 标题行
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('📖', style: TextStyle(fontSize: 20)),
-                  const SizedBox(width: 8),
+                  // 封面缩略图
+                  _buildCover(cs, job),
+                  const SizedBox(width: 12),
+                  // 右侧内容
                   Expanded(
-                    child: Text(
-                      job.sourceFileName.replaceAll('.epub', ''),
-                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // 标题行 + 删除按钮
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                job.sourceFileName.replaceAll('.epub', ''),
+                                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (widget.onDelete != null)
+                              GestureDetector(
+                                onTap: widget.onDelete,
+                                child: Padding(
+                                  padding: const EdgeInsets.all(2),
+                                  child: Icon(Icons.delete_outline_rounded, size: 16, color: cs.onSurfaceVariant.withValues(alpha: 0.6)),
+                                ),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        // 标签行
+                        Text(
+                          '${job.engineLabel} · ${job.langPairLabel} · ${job.outputLabel}',
+                          style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                        ),
+                        const SizedBox(height: 8),
+                        // 状态行
+                        _buildStatusRow(cs, state, percent, progress),
+                      ],
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 6),
-
-              // 标签行
-              Text(
-                '${job.engineLabel} · ${job.langPairLabel} · ${job.outputLabel}',
-                style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-              ),
-              const SizedBox(height: 10),
-
-              // 状态行
-              _buildStatusRow(cs, state, percent, progress),
-
               // 展开详情
               if (_expanded && progress != null) ...[
                 const Divider(height: 20),
@@ -83,6 +105,34 @@ class _JobCardState extends State<JobCard> {
     );
   }
 
+  Widget _buildCover(ColorScheme cs, Job job) {
+    final bytes = _decodeCoverBytes(job.coverImage);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(6),
+      child: SizedBox(
+        width: 48,
+        height: 64,
+        child: bytes != null
+            ? Image.memory(bytes, fit: BoxFit.cover)
+            : Container(
+                color: cs.surfaceContainerHighest,
+                child: Icon(Icons.menu_book_rounded, size: 24, color: cs.onSurfaceVariant),
+              ),
+      ),
+    );
+  }
+
+  static Uint8List? _decodeCoverBytes(String? dataUri) {
+    if (dataUri == null || !dataUri.startsWith('data:')) return null;
+    try {
+      final commaIndex = dataUri.indexOf(',');
+      if (commaIndex < 0) return null;
+      return base64Decode(dataUri.substring(commaIndex + 1));
+    } catch (_) {
+      return null;
+    }
+  }
+
   Widget _buildStatusRow(ColorScheme cs, String state, int percent, JobProgress? progress) {
     if (progress?.isDone == true) {
       return Row(
@@ -92,13 +142,23 @@ class _JobCardState extends State<JobCard> {
           Text('翻译完成', style: TextStyle(color: Colors.green.shade600, fontWeight: FontWeight.w500)),
           const Spacer(),
           if (widget.onDownload != null)
-            FilledButton.icon(
-              onPressed: widget.onDownload,
-              icon: const Icon(Icons.download, size: 18),
-              label: const Text('下载'),
-              style: FilledButton.styleFrom(
-                minimumSize: const Size(0, 36),
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+            GestureDetector(
+              onTap: widget.onDownload,
+              child: Container(
+                height: 30,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  color: cs.primary,
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.download_rounded, size: 14, color: cs.onPrimary),
+                    const SizedBox(width: 4),
+                    Text('下载', style: TextStyle(fontSize: 12, color: cs.onPrimary, fontWeight: FontWeight.w500)),
+                  ],
+                ),
               ),
             ),
         ],

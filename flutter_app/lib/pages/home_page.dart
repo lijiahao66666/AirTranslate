@@ -81,6 +81,54 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _deleteJob(Job job) async {
+    final state = job.progress?.state ?? 'CREATED';
+    final isStarted = state == 'TRANSLATING' || state == 'DONE' || state == 'FAILED';
+    final isAI = job.engineType == 'AI' && job.pointsDeducted > 0;
+    String hint;
+    if (isAI && !isStarted) {
+      hint = '任务尚未开始翻译，删除后将自动退还 ${NumberFormat("#,###").format(job.pointsDeducted)} 积分。';
+    } else if (isAI && isStarted) {
+      hint = '任务已开始翻译，删除后积分不予退还。';
+    } else {
+      hint = '确定要删除该任务吗？';
+    }
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        final dcs = Theme.of(ctx).colorScheme;
+        return AlertDialog(
+          title: Text(
+            '删除「${job.sourceFileName.replaceAll('.epub', '')}」',
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          content: Text(hint, style: TextStyle(fontSize: 13, color: dcs.onSurfaceVariant)),
+          actionsAlignment: MainAxisAlignment.end,
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消', style: TextStyle(fontSize: 13)),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: FilledButton.styleFrom(backgroundColor: dcs.error),
+              child: const Text('删除', style: TextStyle(fontSize: 13)),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirm != true) return;
+    try {
+      await _api.deleteJob(job.jobId);
+      _loadData();
+    } catch (e) {
+      _showError('删除失败: $e');
+    }
+  }
+
   void _showError(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -100,40 +148,45 @@ class _HomePageState extends State<HomePage> {
           slivers: [
             // 渐变顶栏
             SliverAppBar(
-              expandedHeight: 100,
+              expandedHeight: 0,
+              toolbarHeight: 56,
               pinned: true,
-              flexibleSpace: FlexibleSpaceBar(
-                background: Container(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: AppTheme.gradientColors,
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                    ),
+              centerTitle: true,
+              flexibleSpace: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: AppTheme.gradientColors,
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
                   ),
                 ),
               ),
-              title: const Text('AirTranslate', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              title: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.auto_stories_rounded, color: Colors.white.withValues(alpha: 0.9), size: 22),
+                  const SizedBox(width: 8),
+                  const Text('灵译', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18, letterSpacing: 2)),
+                ],
+              ),
               actions: [
-                // 积分 + 充值按钮
+                // 积分按钮
                 GestureDetector(
                   onTap: () => WalletSheet.show(context, _balance, () => _refreshJobs()),
                   child: Container(
                     margin: const EdgeInsets.only(right: 16),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
+                      color: Colors.white.withValues(alpha: 0.2),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Text('🪙 ', style: TextStyle(fontSize: 14)),
+                        const Text('🪙 ', style: TextStyle(fontSize: 13)),
                         Text(fmt.format(_balance), style: const TextStyle(
-                          color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14,
+                          color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13,
                         )),
-                        const SizedBox(width: 4),
-                        const Text('充值 ▸', style: TextStyle(color: Colors.white70, fontSize: 12)),
                       ],
                     ),
                   ),
@@ -144,9 +197,9 @@ class _HomePageState extends State<HomePage> {
             // 标题
             SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 6),
                 child: Text('我的翻译', style: TextStyle(
-                  fontSize: 18, fontWeight: FontWeight.w600, color: cs.onSurface,
+                  fontSize: 17, fontWeight: FontWeight.w600, color: cs.onSurface,
                 )),
               ),
             ),
@@ -166,7 +219,7 @@ class _HomePageState extends State<HomePage> {
                       const SizedBox(height: 16),
                       Text('还没有翻译任务', style: TextStyle(fontSize: 16, color: cs.onSurfaceVariant)),
                       const SizedBox(height: 8),
-                      Text('点击下方按钮开始翻译', style: TextStyle(fontSize: 14, color: cs.outlineVariant)),
+                      Text('点击下方按钮开始翻译书籍', style: TextStyle(fontSize: 14, color: cs.outlineVariant)),
                     ],
                   ),
                 ),
@@ -179,6 +232,7 @@ class _HomePageState extends State<HomePage> {
                     return JobCard(
                       job: job,
                       onDownload: job.progress?.isDone == true ? () => _download(job) : null,
+                      onDelete: () => _deleteJob(job),
                     ).animate().fadeIn(duration: 300.ms, delay: (index * 50).ms).slideY(begin: 0.05, end: 0);
                   },
                   childCount: _jobs.length,
@@ -199,11 +253,11 @@ class _HomePageState extends State<HomePage> {
             MaterialPageRoute(builder: (_) => const CreateJobPage()),
           );
           if (result == true) {
-            _loadData();
+            _refreshJobs();
           }
         },
         icon: const Icon(Icons.add),
-        label: const Text('新建翻译任务'),
+        label: const Text('新建翻译'),
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
     );

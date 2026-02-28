@@ -11,6 +11,7 @@ class Job {
   final bool useGlossary;
   final int pointsDeducted;
   final String createdAt;
+  final String? coverImage;
   final JobProgress? progress;
 
   Job({
@@ -26,6 +27,7 @@ class Job {
     this.useGlossary = false,
     this.pointsDeducted = 0,
     required this.createdAt,
+    this.coverImage,
     this.progress,
   });
 
@@ -44,6 +46,7 @@ class Job {
       useGlossary: json['useGlossary'] == true,
       pointsDeducted: (json['pointsDeducted'] ?? 0) is int ? json['pointsDeducted'] : int.tryParse('${json['pointsDeducted']}') ?? 0,
       createdAt: json['createdAt'] ?? '',
+      coverImage: json['coverImage'],
       progress: progressJson != null ? JobProgress.fromJson(progressJson) : null,
     );
   }

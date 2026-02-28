@@ -6,6 +6,8 @@ import 'pages/home_page.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await ApiService().init();
+  // 触发初始积分赠送（首次安装）
+  try { await ApiService().initBalance(); } catch (_) {}
   runApp(const AirTranslateApp());
 }
 
@@ -15,7 +17,7 @@ class AirTranslateApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AirTranslate',
+      title: '灵译',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),

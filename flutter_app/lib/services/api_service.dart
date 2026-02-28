@@ -6,8 +6,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/job.dart';
 
 class ApiService {
-  static const _prefKey = 'scf_base_url';
-  static const _defaultUrl = 'https://1256643821-82t891ur5f.ap-guangzhou.tencentscf.com';
+  static const _prefKey = 'server_base_url';
+  // TODO: 备案通过后改为 https://translate-api.air-inc.top
+  static const _defaultUrl = 'http://122.51.10.98:9001';
 
   String _baseUrl = _defaultUrl;
   String? _deviceId;
@@ -45,8 +46,9 @@ class ApiService {
     int charCount = 0,
     bool useContext = false,
     bool useGlossary = false,
+    String? coverImage,
   }) async {
-    final resp = await _post('/jobs/create', {
+    final body = <String, dynamic>{
       'engineType': engineType,
       'output': output,
       'deviceId': deviceId,
@@ -56,7 +58,9 @@ class ApiService {
       'charCount': charCount,
       'useContext': useContext,
       'useGlossary': useGlossary,
-    });
+    };
+    if (coverImage != null) body['coverImage'] = coverImage;
+    final resp = await _post('/jobs/create', body);
     return resp;
   }
 
@@ -98,9 +102,25 @@ class ApiService {
     return list.map((e) => Job.fromJson(e as Map<String, dynamic>)).toList();
   }
 
+  /// 删除/取消任务
+  Future<Map<String, dynamic>> deleteJob(String jobId) async {
+    return await _post('/jobs/delete', {'jobId': jobId});
+  }
+
   // -----------------------------------------------------------------------
   // Billing
   // -----------------------------------------------------------------------
+
+  /// 获取服务端配置（积分数量等）
+  Future<Map<String, dynamic>> getConfig() async {
+    return await _get('/config', {});
+  }
+
+  /// 初始化积分（首次赠送）+ 返回余额
+  Future<int> initBalance() async {
+    final resp = await _post('/billing/init', {'deviceId': deviceId});
+    return (resp['balance'] ?? 0) as int;
+  }
 
   /// 查询积分余额
   Future<int> getBalance() async {
@@ -108,12 +128,14 @@ class ApiService {
     return (resp['balance'] ?? 0) as int;
   }
 
-  /// 兑换卡密
-  Future<Map<String, dynamic>> redeem(String licenseCode) async {
-    return await _post('/billing/redeem', {
-      'licenseCode': licenseCode,
-      'deviceId': deviceId,
-    });
+  /// 每日签到，返回 {points, streak, alreadyDone, balance}
+  Future<Map<String, dynamic>> checkin() async {
+    return await _post('/checkin', {'deviceId': deviceId});
+  }
+
+  /// 查询签到状态，返回 {checkedInToday, streak}
+  Future<Map<String, dynamic>> checkinStatus() async {
+    return await _post('/checkin/status', {'deviceId': deviceId});
   }
 
   // -----------------------------------------------------------------------
