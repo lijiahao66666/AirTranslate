@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
 
 import '../services/auth_service.dart';
 
@@ -92,10 +93,98 @@ class _LoginPageState extends State<LoginPage> {
     setState(() => _logging = false);
 
     if (result.success) {
+      if (result.isNewUser && result.balance != null && result.balance! > 0 && mounted) {
+        await _showGrantAnimation(context, result.balance!);
+      }
       if (mounted) Navigator.of(context).pop(true);
     } else {
       setState(() => _error = result.error ?? '登录失败');
     }
+  }
+
+  Future<void> _showGrantAnimation(BuildContext ctx, int points) async {
+    final fmt = NumberFormat('#,###');
+    await showGeneralDialog(
+      context: ctx,
+      barrierDismissible: true,
+      barrierLabel: 'grant',
+      barrierColor: Colors.black54,
+      transitionDuration: const Duration(milliseconds: 350),
+      transitionBuilder: (context, anim, _, child) {
+        return ScaleTransition(
+          scale: CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
+          child: FadeTransition(opacity: anim, child: child),
+        );
+      },
+      pageBuilder: (context, _, __) {
+        return Center(
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              width: 260,
+              padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 24),
+              decoration: BoxDecoration(
+                color: Theme.of(context).brightness == Brightness.dark
+                    ? const Color(0xFF2C2C2E)
+                    : Colors.white,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('🎉', style: TextStyle(fontSize: 40)),
+                  const SizedBox(height: 12),
+                  Text(
+                    '登录成功',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Theme.of(context).brightness == Brightness.dark
+                          ? Colors.white
+                          : Colors.black87,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '赠送初始积分',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Theme.of(context).brightness == Brightness.dark
+                          ? Colors.white54
+                          : Colors.black45,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '+${fmt.format(points)}',
+                    style: const TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF4FC3F7),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 38,
+                    child: FilledButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFF4FC3F7),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      child: const Text('知道了', style: TextStyle(fontSize: 14)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -118,19 +207,6 @@ class _LoginPageState extends State<LoginPage> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // 顶部拖动条
-          Center(
-            child: Container(
-              width: 36,
-              height: 4,
-              decoration: BoxDecoration(
-                color: isDark ? Colors.white24 : Colors.black12,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-
           // 标题
           Text(
             '登录灵译',

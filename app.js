@@ -566,24 +566,19 @@ function ensureInitialGrant(deviceId) {
 
 function doCheckin(deviceId) {
   const today = new Date().toISOString().substring(0, 10);
-  const yesterday = new Date(Date.now() - 86400000).toISOString().substring(0, 10);
   const data = _readPointsData(deviceId);
 
   const lastCheckin = data.lastCheckinDate || '';
   if (lastCheckin === today) {
-    return { points: 0, streak: data.checkinStreak || 0, alreadyDone: true, balance: Number(data.balance) || 0 };
+    return { points: 0, alreadyDone: true, balance: Number(data.balance) || 0 };
   }
-
-  let streak = Number(data.checkinStreak || 0);
-  streak = (lastCheckin === yesterday) ? streak + 1 : 1;
 
   const cfg = loadConfig();
   data.balance = (Number(data.balance) || 0) + cfg.checkin_points;
   data.lastCheckinDate = today;
-  data.checkinStreak = streak;
   _writePointsData(deviceId, data);
-  console.log(`[checkin] ${deviceId} +${cfg.checkin_points} streak=${streak}`);
-  return { points: cfg.checkin_points, streak, alreadyDone: false, balance: data.balance };
+  console.log(`[checkin] ${deviceId} +${cfg.checkin_points}`);
+  return { points: cfg.checkin_points, alreadyDone: false, balance: data.balance };
 }
 
 // ---------------------------------------------------------------------------
@@ -945,8 +940,7 @@ function handleCheckinStatus(req, res, body) {
   const data = _readPointsData(id);
   const today = new Date().toISOString().substring(0, 10);
   const done = data.lastCheckinDate === today;
-  const streak = Number(data.checkinStreak || 0);
-  return sendJson(res, 200, { checkedInToday: done, streak });
+  return sendJson(res, 200, { checkedInToday: done });
 }
 
 // ---------------------------------------------------------------------------

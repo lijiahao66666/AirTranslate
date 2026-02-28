@@ -31,7 +31,6 @@ class WalletSheet extends StatefulWidget {
 class _WalletSheetState extends State<WalletSheet> {
   bool _checkedInToday = false;
   bool _checkinBusy = false;
-  int _streak = 0;
   int _checkinPoints = 5000;
 
   @override
@@ -58,7 +57,6 @@ class _WalletSheetState extends State<WalletSheet> {
       if (mounted) {
         setState(() {
           _checkedInToday = status['checkedInToday'] == true;
-          _streak = (status['streak'] as num?)?.toInt() ?? 0;
         });
       }
     } catch (_) {}
@@ -70,11 +68,9 @@ class _WalletSheetState extends State<WalletSheet> {
     try {
       final result = await ApiService().checkin();
       final points = (result['points'] as num?)?.toInt() ?? 0;
-      final streak = (result['streak'] as num?)?.toInt() ?? 0;
       if (mounted) {
         setState(() {
           _checkedInToday = true;
-          _streak = streak;
         });
         widget.onBalanceChanged();
         if (points > 0) {
@@ -150,8 +146,8 @@ class _WalletSheetState extends State<WalletSheet> {
                         const SizedBox(height: 2),
                         Text(
                           _checkedInToday
-                              ? '今日已签到  连续 $_streak 天'
-                              : '签到领 +${NumberFormat('#,###').format(_checkinPoints)} 积分${_streak > 0 ? '  已连续 $_streak 天' : ''}',
+                              ? '今日已签到'
+                              : '签到领 +${NumberFormat('#,###').format(_checkinPoints)} 积分',
                           style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                         ),
                       ],
