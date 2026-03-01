@@ -8,10 +8,8 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await ApiService().init();
   await AuthService.init();
-  // 登录用户初始化积分（绑定到 userId）
-  if (AuthService.isLoggedIn) {
-    try { await ApiService().initBalance(); } catch (_) {}
-  }
+  // 初始化积分（deviceId 即可，无需登录）
+  try { await ApiService().initBalance(); } catch (_) {}
   runApp(const AirTranslateApp());
 }
 

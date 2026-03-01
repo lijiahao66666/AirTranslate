@@ -172,10 +172,12 @@ class AuthService {
     final baseUrl = ApiService().baseUrl;
     if (baseUrl.isNotEmpty && _token.isNotEmpty) {
       try {
+        final headers = _buildHeaders(withAuth: true);
+        headers['X-Device-Id'] = ApiService().deviceId;
         await http
             .post(
               Uri.parse('$baseUrl/auth/logout'),
-              headers: _buildHeaders(withAuth: true),
+              headers: headers,
             )
             .timeout(const Duration(seconds: 5));
       } catch (_) {}

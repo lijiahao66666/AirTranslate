@@ -29,6 +29,8 @@ __pycache__/
 # Flutter
 flutter_app/.metadata
 flutter_app/ios/
+flutter_app/android/key.properties
+flutter_app/android/app/*.jks
 
 # Test artifacts
 test/*.epub

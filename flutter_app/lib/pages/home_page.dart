@@ -307,9 +307,8 @@ class _HomePageState extends State<HomePage> {
                 ],
               ),
               actions: [
-                // 积分按钮（仅登录后显示余额，未登录不显示）
-                if (AuthService.isLoggedIn)
-                  GestureDetector(
+                // 积分按钮
+                GestureDetector(
                     onTap: () => WalletSheet.show(context, _balance, () => _refreshJobs()),
                     child: Container(
                       margin: const EdgeInsets.only(right: 8),

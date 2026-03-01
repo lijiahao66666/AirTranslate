@@ -552,14 +552,21 @@ function writePointsBalance(deviceId, balance) {
   return data.balance;
 }
 
-function ensureInitialGrant(deviceId) {
+function ensureInitialGrant(deviceId, isUserId) {
   const data = _readPointsData(deviceId);
   if (!data.initialGranted) {
-    const cfg = loadConfig();
-    data.balance = (Number(data.balance) || 0) + cfg.initial_grant_points;
-    data.initialGranted = true;
-    _writePointsData(deviceId, data);
-    console.log(`[points] initial grant ${cfg.initial_grant_points} to ${deviceId}`);
+    if (isUserId) {
+      // Logged-in account — grant initial points
+      const cfg = loadConfig();
+      data.balance = (Number(data.balance) || 0) + cfg.initial_grant_points;
+      data.initialGranted = true;
+      _writePointsData(deviceId, data);
+      console.log(`[points] initial grant ${cfg.initial_grant_points} to userId=${deviceId}`);
+    } else {
+      // Anonymous device — just ensure record exists, no grant
+      _writePointsData(deviceId, data);
+      console.log(`[points] new anonymous device ${deviceId}, balance=${data.balance}`);
+    }
   }
   return Number(data.balance) || 0;
 }
@@ -913,9 +920,10 @@ function handleBalance(req, res, deviceId) {
 // ---------------------------------------------------------------------------
 
 function handleBillingInit(req, res, body) {
-  const id = getEffectiveId(req, body);
+  const userId = getUserIdFromReq(req);
+  const id = userId || getEffectiveId(req, body);
   if (!id) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
-  const balance = ensureInitialGrant(id);
+  const balance = ensureInitialGrant(id, !!userId);
   return sendJson(res, 200, { deviceId: id, balance });
 }
 
@@ -1173,15 +1181,18 @@ const server = http.createServer(async (req, res) => {
       }
       const isNew = !fs.existsSync(_userFile(phone.replace(/[^0-9]/g, '')));
       const user = findOrCreateUser(phone);
-      if (isNew) ensureInitialGrant(user.userId);
-      // 迁移 deviceId 积分到 userId
+      // Ensure initial grant for user account (idempotent)
+      ensureInitialGrant(user.userId, true);
+      // Merge device anonymous points INTO userId (additive), then reset device
       const deviceId = String(req.headers['x-device-id'] || body.deviceId || '').trim();
       if (deviceId && deviceId !== user.userId) {
         const deviceBalance = readPointsBalance(deviceId);
-        const userBalance = readPointsBalance(user.userId);
-        if (deviceBalance > userBalance) {
-          writePointsBalance(user.userId, deviceBalance);
-          console.log(`[Auth] Merged points from device ${deviceId} to user ${user.userId}: ${deviceBalance}`);
+        if (deviceBalance > 0) {
+          const userBalance = readPointsBalance(user.userId);
+          const merged = userBalance + deviceBalance;
+          writePointsBalance(user.userId, merged);
+          writePointsBalance(deviceId, 0);
+          console.log(`[Auth] Merged device ${deviceId} points (+${deviceBalance}) into user ${user.userId}, new balance=${merged}`);
         }
       }
       if (deviceId && !user.devices.includes(deviceId)) {
@@ -1210,7 +1221,13 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && pathname === '/auth/logout') {
       const token = String(req.headers['x-auth-token'] || '').trim();
+      const deviceId = String(req.headers['x-device-id'] || '').trim();
       if (token) revokeToken(token);
+      // Reset device points to 0 after logout (points stay with account)
+      if (deviceId) {
+        writePointsBalance(deviceId, 0);
+        console.log(`[Auth] Reset device ${deviceId} points to 0 after logout`);
+      }
       return sendJson(res, 200, { success: true });
     }
 

@@ -146,12 +146,6 @@ class _CreateJobPageState extends State<CreateJobPage> {
       return;
     }
 
-    // AI 翻译需要登录（消耗积分）
-    if (_engineType == 'AI' && !AuthService.isLoggedIn) {
-      final loggedIn = await LoginPage.show(context);
-      if (!loggedIn) return;
-    }
-
     setState(() => _submitting = true);
     try {
       // 1. 创建任务
