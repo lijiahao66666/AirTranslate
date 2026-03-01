@@ -93,9 +93,12 @@ class _CreateJobPageState extends State<CreateJobPage> {
 
   int get _estimatedPoints {
     if (!_isAI || _charCount <= 0) return 0;
-    int unitCost = _billingUnitCost;
-    if (_engineType == 'AI_ONLINE') unitCost *= _onlineMultiplier;
-    return (_charCount / _billingUnitChars).ceil() * unitCost;
+    if (_engineType == 'AI_ONLINE') {
+      // 在线: 1积分/字，不按百取整
+      return (_charCount * _billingUnitCost * _onlineMultiplier / _billingUnitChars).ceil();
+    }
+    // 个人: 1积分/100字，按百取整
+    return (_charCount / _billingUnitChars).ceil() * _billingUnitCost;
   }
 
   /// 费用预估显示的费率（从 config 动态：在线 1积分/字，个人 1积分/100字）

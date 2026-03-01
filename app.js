@@ -709,15 +709,18 @@ function handleCreateJob(req, res, body) {
   if (!sourceFileName) return sendJson(res, 400, { error: 'BadRequest', message: 'sourceFileName required' });
   if (!effectiveId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
 
-  // AI翻译: 预扣积分 (绑定到 effectiveId: 登录用 userId, 未登录用 deviceId)
+  // AI翻译: 预扣积分 (在线按字计 1积分/字，个人按百字计 1积分/100字)
   let pointsDeducted = 0;
   if (isAiEngine(engineType) && charCount > 0) {
     const cfg = loadConfig();
-    let unitCost = cfg.billing_unit_cost;
+    const { billing_unit_chars, billing_unit_cost, online_ai_billing_multiplier } = cfg;
     if (engineType === 'AI_ONLINE') {
-      unitCost = unitCost * (cfg.online_ai_billing_multiplier || 100);
+      // 在线: 1积分/字，不按百取整
+      pointsDeducted = Math.ceil((charCount * billing_unit_cost * (online_ai_billing_multiplier || 100)) / (billing_unit_chars || 100));
+    } else {
+      // 个人: 1积分/100字，按百取整
+      pointsDeducted = Math.ceil(charCount / (billing_unit_chars || 100)) * billing_unit_cost;
     }
-    pointsDeducted = Math.ceil(charCount / cfg.billing_unit_chars) * unitCost;
     const balance = readPointsBalance(effectiveId);
     if (balance < pointsDeducted) {
       return sendJson(res, 409, { error: 'POINTS_INSUFFICIENT', need: pointsDeducted, balance });
