@@ -50,9 +50,7 @@ class ApiService {
     required String targetLang,
     required String sourceFileName,
     int charCount = 0,
-    bool useContext = false,
     bool useGlossary = false,
-    String translateMode = 'PARAGRAPH',
   }) async {
     final body = <String, dynamic>{
       'engineType': engineType,
@@ -62,9 +60,7 @@ class ApiService {
       'targetLang': targetLang,
       'sourceFileName': sourceFileName,
       'charCount': charCount,
-      'useContext': useContext,
       'useGlossary': useGlossary,
-      'translateMode': translateMode,
     };
     final resp = await _post('/jobs/create', body);
     return resp;

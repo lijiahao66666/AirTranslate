@@ -26,6 +26,8 @@ class JobCard extends StatefulWidget {
 
 class _JobCardState extends State<JobCard> {
   bool _expanded = false;
+  Uint8List? _cachedCoverBytes;
+  String? _cachedCoverUri;
 
   @override
   Widget build(BuildContext context) {
@@ -108,14 +110,18 @@ class _JobCardState extends State<JobCard> {
   }
 
   Widget _buildCover(ColorScheme cs, Job job) {
-    final bytes = _decodeCoverBytes(job.coverImage);
+    if (job.coverImage != _cachedCoverUri) {
+      _cachedCoverUri = job.coverImage;
+      _cachedCoverBytes = _decodeCoverBytes(job.coverImage);
+    }
+    final bytes = _cachedCoverBytes;
     return ClipRRect(
       borderRadius: BorderRadius.circular(6),
       child: SizedBox(
         width: 48,
         height: 64,
         child: bytes != null
-            ? Image.memory(bytes, fit: BoxFit.cover)
+            ? Image.memory(bytes, fit: BoxFit.cover, gaplessPlayback: true)
             : Container(
                 color: cs.surfaceContainerHighest,
                 child: Icon(Icons.menu_book_rounded, size: 24, color: cs.onSurfaceVariant),
@@ -232,7 +238,7 @@ class _JobCardState extends State<JobCard> {
             if (progress?.chapterIndex != null && progress?.chapterTotal != null) ...[
               const SizedBox(width: 8),
               Text(
-                '第 ${progress!.chapterIndex}/${progress.chapterTotal} 章',
+                '${progress!.chapterIndex}/${progress.chapterTotal}章',
                 style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
               ),
             ],
@@ -249,7 +255,7 @@ class _JobCardState extends State<JobCard> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (progress.chapterIndex != null)
-          _detailRow(cs, '📌', '当前', '第 ${progress.chapterIndex} 章 / 共 ${progress.chapterTotal} 章'),
+          _detailRow(cs, '📌', '当前', '正在翻译第 ${progress.chapterIndex} 章（共 ${progress.chapterTotal} 章）'),
         if (job.pointsDeducted > 0)
           _detailRow(cs, '💰', '积分', '预扣 ${NumberFormat("#,###").format(job.pointsDeducted)} 积分'),
         if (progress.isFailed && progress.error != null)

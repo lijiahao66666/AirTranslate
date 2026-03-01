@@ -1,12 +1,13 @@
 'use strict';
 
 // =========================================================================
-// AirTranslate Server (v4 - local filesystem)
-// - 积分/任务/进度/队列: 本地文件系统 ./data/
+// AirTranslate Server (v6 - all-in-one, no Worker)
+// - 积分/任务/进度: 本地文件系统 ./data/
 // - COS: 仅用于 presign URL (EPUB 上传/下载/术语表)
-// - /jobs/*    : App 面向的 API
-// - /billing/* : 积分 API
-// - /worker/*  : Worker 内部 API (获取队列/更新进度/完成/失败)
+// - 翻译引擎 (三引擎独立并发，互不干扰):
+//   · 机器翻译 (10并发): Azure Edge → MyMemory → Google, 段落级
+//   · AI翻译·在线 (3并发): 腾讯混元翻译 API, 章节级逐段, 支持术语 References
+//   · AI翻译·个人 (1并发): 通过 frp 内网穿透访问本地 vLLM, 章节级分块
 // - 端口 9001 (避免和 AirRead 的 9000 冲突)
 // =========================================================================
 
@@ -39,6 +40,44 @@ const https = require('https');
 })();
 
 // ---------------------------------------------------------------------------
+// 信号量 (独立并发控制)
+// ---------------------------------------------------------------------------
+
+class Semaphore {
+  constructor(max) {
+    this._max = max;
+    this._current = 0;
+    this._queue = [];
+  }
+  acquire() {
+    if (this._current < this._max) {
+      this._current++;
+      return Promise.resolve();
+    }
+    return new Promise(resolve => this._queue.push(resolve));
+  }
+  release() {
+    this._current--;
+    if (this._queue.length > 0) {
+      this._current++;
+      this._queue.shift()();
+    }
+  }
+  get running() { return this._current; }
+  get waiting() { return this._queue.length; }
+}
+
+const SEM_MACHINE   = new Semaphore(10);
+const SEM_AI_ONLINE = new Semaphore(3);
+const SEM_AI_LOCAL  = new Semaphore(1);
+
+function getSemaphore(engineType) {
+  if (engineType === 'AI_ONLINE') return SEM_AI_ONLINE;
+  if (engineType === 'AI') return SEM_AI_LOCAL;
+  return SEM_MACHINE;
+}
+
+// ---------------------------------------------------------------------------
 // 数据目录初始化
 // ---------------------------------------------------------------------------
 
@@ -46,7 +85,6 @@ const DATA_DIR = path.join(__dirname, 'data');
 const DIRS = {
   points:   path.join(DATA_DIR, 'points'),
   jobs:     path.join(DATA_DIR, 'jobs'),
-  queue:    path.join(DATA_DIR, 'queue'),
 };
 
 for (const dir of Object.values(DIRS)) {
@@ -180,23 +218,17 @@ function normalizeOutput(output) {
 
 function normalizeEngineType(engine) {
   const e = String(engine || '').trim().toUpperCase();
+  if (e === 'AI_ONLINE') return 'AI_ONLINE';
   if (e === 'AI' || e === 'HY') return 'AI';
   return 'MACHINE';
 }
 
-// ---------------------------------------------------------------------------
-// Worker 密钥验证
-// ---------------------------------------------------------------------------
-
-function verifyWorkerKey(req) {
-  const key = (process.env.WORKER_API_KEY || '').trim();
-  if (!key) return true; // 未配置则跳过
-  const header = (req.headers['x-worker-key'] || '').trim();
-  return header === key;
+function isAiEngine(engineType) {
+  return engineType === 'AI' || engineType === 'AI_ONLINE';
 }
 
 // ---------------------------------------------------------------------------
-// Tencent Cloud v3 签名 (用于短信 API)
+// Tencent Cloud v3 签名 (用于短信/混元 API)
 // ---------------------------------------------------------------------------
 
 function sha256Hex(msg) {
@@ -478,6 +510,8 @@ const DEFAULT_CONFIG = {
   initial_grant_points: 500000,
   billing_unit_chars: 1000,
   billing_unit_cost: 1,
+  online_ai_billing_multiplier: 100,
+  local_ai_enabled: true,
   latest_version: '1.0.0',
   min_version: '1.0.0',
   update_url: '',
@@ -500,6 +534,46 @@ if (!fs.existsSync(CONFIG_FILE)) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2), 'utf-8');
   console.log('[config] Created default ' + CONFIG_FILE);
 }
+
+// ---------------------------------------------------------------------------
+// vLLM 健康检查 (定时 ping 本地 AI API 是否可达)
+// ---------------------------------------------------------------------------
+
+let _vllmAvailable = false;
+const VLLM_HEALTH_INTERVAL_MS = 30_000;
+
+function isLocalAiAvailable() {
+  const cfg = loadConfig();
+  if (!cfg.local_ai_enabled) return false;
+  return _vllmAvailable;
+}
+
+function checkVllmHealth() {
+  const vllmUrl = (process.env.VLLM_API_URL || '').trim();
+  if (!vllmUrl || !loadConfig().local_ai_enabled) {
+    _vllmAvailable = false;
+    return;
+  }
+  const url = `${vllmUrl}/v1/models`;
+  const mod = url.startsWith('https') ? https : http;
+  const req = mod.get(url, { timeout: 5000 }, (resp) => {
+    let data = '';
+    resp.on('data', c => data += c);
+    resp.on('end', () => {
+      const wasAvailable = _vllmAvailable;
+      _vllmAvailable = resp.statusCode >= 200 && resp.statusCode < 300;
+      if (_vllmAvailable && !wasAvailable) console.log('[vllm] Local AI is online: %s', vllmUrl);
+      if (!_vllmAvailable && wasAvailable) console.log('[vllm] Local AI went offline');
+    });
+  });
+  req.on('error', () => {
+    if (_vllmAvailable) console.log('[vllm] Local AI went offline (unreachable)');
+    _vllmAvailable = false;
+  });
+}
+
+checkVllmHealth();
+setInterval(checkVllmHealth, VLLM_HEALTH_INTERVAL_MS);
 
 // ---------------------------------------------------------------------------
 // 启动迁移：清理 job.json 中的 coverImage 字段（体积过大导致 API 超时）
@@ -613,57 +687,6 @@ function writeProgress(jobId, progress) {
 }
 
 // ---------------------------------------------------------------------------
-// 队列管理 (本地文件: data/queue/{jobId}.json)
-// ---------------------------------------------------------------------------
-
-function enqueue(jobId) {
-  writeJsonFile(path.join(DIRS.queue, `${jobId}.json`), { jobId, enqueuedAt: new Date().toISOString() });
-}
-
-function dequeue(jobId) {
-  const filePath = path.join(DIRS.queue, `${jobId}.json`);
-  try { fs.unlinkSync(filePath); } catch (_) {}
-}
-
-function isQueued(jobId) {
-  const filePath = path.join(DIRS.queue, `${jobId}.json`);
-  return fs.existsSync(filePath);
-}
-
-function peekQueue() {
-  try {
-    const files = fs.readdirSync(DIRS.queue).filter((f) => f.endsWith('.json')).sort();
-    if (files.length === 0) return null;
-    const data = readJsonFile(path.join(DIRS.queue, files[0]));
-    return data ? data.jobId : files[0].replace('.json', '');
-  } catch (_) {
-    return null;
-  }
-}
-
-function listQueue(limit = 5) {
-  try {
-    const files = fs.readdirSync(DIRS.queue).filter((f) => f.endsWith('.json')).sort();
-    const ids = [];
-    for (const f of files) {
-      if (ids.length >= limit) break;
-      const data = readJsonFile(path.join(DIRS.queue, f));
-      const id = data ? data.jobId : f.replace('.json', '');
-      // 跳过已完成/已取消的僵尸队列项
-      const progress = readProgress(id);
-      if (progress && (progress.state === 'DONE' || progress.state === 'CANCELED')) {
-        dequeue(id);
-        continue;
-      }
-      ids.push(id);
-    }
-    return ids;
-  } catch (_) {
-    return [];
-  }
-}
-
-// ---------------------------------------------------------------------------
 // API: POST /jobs/create
 // ---------------------------------------------------------------------------
 
@@ -679,9 +702,7 @@ function handleCreateJob(req, res, body) {
   const targetLang = String(body.targetLang || body.target_lang || '').trim();
   const sourceFileName = String(body.sourceFileName || body.source_file_name || '').trim();
   const charCount = Number(body.charCount || 0) || 0;
-  const useContext = Boolean(body.useContext);
   const useGlossary = Boolean(body.useGlossary);
-  const translateMode = String(body.translateMode || 'PARAGRAPH').trim().toUpperCase() === 'CHAPTER' ? 'CHAPTER' : 'PARAGRAPH';
 
   if (!targetLang) return sendJson(res, 400, { error: 'BadRequest', message: 'targetLang required' });
   if (!sourceFileName) return sendJson(res, 400, { error: 'BadRequest', message: 'sourceFileName required' });
@@ -689,9 +710,13 @@ function handleCreateJob(req, res, body) {
 
   // AI翻译: 预扣积分 (绑定到 effectiveId: 登录用 userId, 未登录用 deviceId)
   let pointsDeducted = 0;
-  if (engineType === 'AI' && charCount > 0) {
+  if (isAiEngine(engineType) && charCount > 0) {
     const cfg = loadConfig();
-    pointsDeducted = Math.ceil(charCount / cfg.billing_unit_chars) * cfg.billing_unit_cost;
+    let unitCost = cfg.billing_unit_cost;
+    if (engineType === 'AI_ONLINE') {
+      unitCost = unitCost * (cfg.online_ai_billing_multiplier || 100);
+    }
+    pointsDeducted = Math.ceil(charCount / cfg.billing_unit_chars) * unitCost;
     const balance = readPointsBalance(effectiveId);
     if (balance < pointsDeducted) {
       return sendJson(res, 409, { error: 'POINTS_INSUFFICIENT', need: pointsDeducted, balance });
@@ -706,7 +731,7 @@ function handleCreateJob(req, res, body) {
   const spec = {
     jobId, engineType, output, deviceId: rawDeviceId, ownerId: effectiveId,
     sourceLang, targetLang, sourceFileName, charCount,
-    useContext, useGlossary, translateMode,
+    useGlossary,
     pointsDeducted, createdAt: nowIso,
   };
   const progress = { jobId, state: 'CREATED', percent: 0, engineType, output, updatedAt: nowIso };
@@ -718,9 +743,9 @@ function handleCreateJob(req, res, body) {
   const sourceKey = buildCosKey(`${jobId}/source.epub`);
   const uploadUrl = cosPresignUrl({ method: 'PUT', key: sourceKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
 
-  // 术语表上传 URL (AI + useGlossary)
+  // 术语表上传 URL (AI/AI_ONLINE + useGlossary)
   let glossaryUpload = null;
-  if (engineType === 'AI' && useGlossary) {
+  if (isAiEngine(engineType) && useGlossary) {
     const glossaryKey = buildCosKey(`${jobId}/glossary.json`);
     const glossaryUrl = cosPresignUrl({ method: 'PUT', key: glossaryKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/json' } });
     glossaryUpload = { cosKey: glossaryKey, url: glossaryUrl, method: 'PUT', contentType: 'application/json' };
@@ -771,15 +796,16 @@ function handleStartJob(res, body) {
     return sendJson(res, 409, { error: 'InvalidState', message: `cannot start from state ${state}` });
   }
 
-  if (!isQueued(jobId)) {
-    enqueue(jobId);
-  }
-
   progress.state = 'UPLOADED';
   progress.updatedAt = new Date().toISOString();
   writeProgress(jobId, progress);
 
-  return sendJson(res, 200, { ok: true, queued: true });
+  // 所有翻译任务由服务端直接异步处理
+  processTranslationJob(jobId).catch(e => {
+    console.error(`[translate][${jobId.substring(0, 8)}] Unhandled error:`, e.message);
+  });
+
+  return sendJson(res, 200, { ok: true, handler: 'server' });
 }
 
 // ---------------------------------------------------------------------------
@@ -883,9 +909,6 @@ function handleDeleteJob(res, body) {
   const progress = readProgress(jobId) || {};
   const state = String(progress.state || 'CREATED').toUpperCase();
 
-  // 从队列中移除
-  dequeue(jobId);
-
   // 退还积分（仅未开始翻译的 AI 任务：CREATED / READY / UPLOADED）
   let refunded = 0;
   const canRefund = (state === 'CREATED' || state === 'READY' || state === 'UPLOADED');
@@ -952,183 +975,793 @@ function handleCheckinStatus(req, res, body) {
 }
 
 // ---------------------------------------------------------------------------
-// Worker API: GET /worker/poll  — 获取下一个待处理任务
+// 翻译引擎: 机器翻译 (Azure Edge → MyMemory → Google, 链式退避)
 // ---------------------------------------------------------------------------
 
-function handleWorkerPoll(req, res) {
-  if (!verifyWorkerKey(req)) return sendJson(res, 403, { error: 'Forbidden' });
+function translateMachine(texts, srcLang, tgtLang) {
+  const engines = [
+    { name: 'azure', fn: translateAzure },
+    { name: 'mymemory', fn: translateMyMemory },
+    { name: 'google', fn: translateGoogle },
+  ];
+  return (async () => {
+    let lastErr;
+    for (const { name, fn } of engines) {
+      try {
+        const result = await fn(texts, srcLang, tgtLang);
+        console.log(`[machine] ${name} OK (${texts.length} texts)`);
+        return result;
+      } catch (e) {
+        lastErr = e;
+        console.log(`[machine] ${name} failed: ${e.message}, trying next...`);
+      }
+    }
+    throw new Error(`All machine engines failed: ${lastErr?.message}`);
+  })();
+}
 
-  const jobId = peekQueue();
-  if (!jobId) return sendJson(res, 200, { jobId: null });
+const _azureLangMap = {
+  en:'en', fr:'fr', de:'de', es:'es', ja:'ja', it:'it', ko:'ko', pt:'pt-pt',
+  ar:'ar', nl:'nl', ru:'ru', th:'th', vi:'vi', zh:'zh-Hans', 'zh-cn':'zh-Hans',
+  'zh-tw':'zh-Hant', 'zh-hans':'zh-Hans', 'zh-hant':'zh-Hant',
+};
+let _azureToken = null, _azureTokenExpires = 0;
 
-  const job = readJobSpec(jobId);
-  if (!job) {
-    // 无效队列项，清除
-    dequeue(jobId);
-    return sendJson(res, 200, { jobId: null });
-  }
-
-  const progress = readProgress(jobId);
-  if (progress && (progress.state === 'DONE' || progress.state === 'CANCELED')) {
-    dequeue(jobId);
-    return sendJson(res, 200, { jobId: null });
-  }
-
-  // 生成 COS presign URL 供 Worker 下载源文件 & 上传结果
-  const { presignSeconds } = getCosConfig();
-  const sourceKey = buildCosKey(`${jobId}/source.epub`);
-  const sourceDownloadUrl = cosPresignUrl({ method: 'GET', key: sourceKey, expiresSeconds: presignSeconds, headers: {} });
-
-  const bilingualKey = buildCosKey(`${jobId}/bilingual.epub`);
-  const bilingualUploadUrl = cosPresignUrl({ method: 'PUT', key: bilingualKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
-
-  const translatedKey = buildCosKey(`${jobId}/translated.epub`);
-  const translatedUploadUrl = cosPresignUrl({ method: 'PUT', key: translatedKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
-
-  // 术语表下载 URL
-  let glossaryDownloadUrl = null;
-  if (job.engineType === 'AI' && job.useGlossary) {
-    const glossaryKey = buildCosKey(`${jobId}/glossary.json`);
-    glossaryDownloadUrl = cosPresignUrl({ method: 'GET', key: glossaryKey, expiresSeconds: presignSeconds, headers: {} });
-  }
-
-  return sendJson(res, 200, {
-    jobId,
-    job,
-    cos: {
-      sourceDownloadUrl,
-      bilingualUploadUrl,
-      translatedUploadUrl,
-      glossaryDownloadUrl,
-    },
+async function _getAzureToken() {
+  if (_azureToken && Date.now() / 1000 < _azureTokenExpires) return _azureToken;
+  return new Promise((resolve, reject) => {
+    https.get('https://edge.microsoft.com/translate/auth', { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 }, (resp) => {
+      let data = '';
+      resp.on('data', c => data += c);
+      resp.on('end', () => { _azureToken = data.trim(); _azureTokenExpires = Date.now() / 1000 + 480; resolve(_azureToken); });
+    }).on('error', reject);
   });
 }
 
+async function translateAzure(texts, srcLang, tgtLang) {
+  const token = await _getAzureToken();
+  const azTgt = _azureLangMap[tgtLang.toLowerCase()] || tgtLang;
+  const body = JSON.stringify(texts.map(t => ({ Text: t })));
+  return new Promise((resolve, reject) => {
+    const url = new URL(`https://api-edge.cognitive.microsofttranslator.com/translate?to=${encodeURIComponent(azTgt)}&api-version=3.0`);
+    const req = https.request({ hostname: url.hostname, path: url.pathname + url.search, method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, (resp) => {
+      let data = '';
+      resp.on('data', c => data += c);
+      resp.on('end', () => {
+        if (resp.statusCode >= 400) return reject(new Error(`Azure ${resp.statusCode}: ${data.substring(0, 200)}`));
+        try {
+          const arr = JSON.parse(data);
+          resolve(arr.map((item, i) => (item.translations && item.translations[0]) ? item.translations[0].text : texts[i]));
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+async function translateMyMemory(texts, srcLang, tgtLang) {
+  const results = [];
+  for (const text of texts) {
+    if (!text || !text.trim()) { results.push(text); continue; }
+    const params = new URLSearchParams({ q: text, langpair: `${srcLang}|${tgtLang}` });
+    const email = (process.env.MYMEMORY_EMAIL || '').trim();
+    if (email) params.set('de', email);
+    const resp = await new Promise((resolve, reject) => {
+      https.get(`https://api.mymemory.translated.net/get?${params}`, { timeout: 15000 }, (r) => {
+        let d = '';
+        r.on('data', c => d += c);
+        r.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+      }).on('error', reject);
+    });
+    const translated = resp?.responseData?.translatedText || '';
+    if (!translated || translated.toUpperCase().includes('MYMEMORY WARNING')) throw new Error('MyMemory limit');
+    results.push(translated);
+  }
+  return results;
+}
+
+async function translateGoogle(texts, srcLang, tgtLang) {
+  const results = [];
+  for (const text of texts) {
+    if (!text || !text.trim()) { results.push(text); continue; }
+    const body = `client=gtx&sl=${srcLang === 'auto' ? 'auto' : srcLang}&tl=${tgtLang}&dt=t&q=${encodeURIComponent(text)}`;
+    const resp = await new Promise((resolve, reject) => {
+      const req = https.request({ hostname: 'translate.googleapis.com', path: '/translate_a/single', method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' }, timeout: 15000 }, (r) => {
+        let d = '';
+        r.on('data', c => d += c);
+        r.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+    let translated = '';
+    if (resp && Array.isArray(resp) && resp[0]) {
+      for (const seg of resp[0]) { if (Array.isArray(seg) && seg[0]) translated += seg[0]; }
+    }
+    results.push(translated || text);
+  }
+  return results;
+}
+
 // ---------------------------------------------------------------------------
-// Worker API: GET /worker/poll-batch  — 批量获取待处理任务 (窗口调度)
+// 翻译引擎: vLLM 本地 AI (通过 frp 穿透访问)
 // ---------------------------------------------------------------------------
 
-function handleWorkerPollBatch(req, res) {
-  if (!verifyWorkerKey(req)) return sendJson(res, 403, { error: 'Forbidden' });
+const VLLM_GEN_KWARGS = { top_k: 20, top_p: 0.6, temperature: 0.7, repetition_penalty: 1.05 };
+const MAX_CHAPTER_PARAGRAPHS = 20;
 
-  const url = new URL(req.url || '/', 'http://localhost');
-  const limit = Math.min(Number(url.searchParams.get('limit') || '5') || 5, 20);
+function callVllmChat(prompt, maxTokens) {
+  const vllmUrl = (process.env.VLLM_API_URL || '').trim().replace(/\/+$/, '');
+  const modelName = (process.env.VLLM_MODEL_NAME || 'HY-MT1.5').trim();
+  if (!vllmUrl) return Promise.reject(new Error('VLLM_API_URL not configured'));
 
-  const jobIds = listQueue(limit);
-  if (jobIds.length === 0) return sendJson(res, 200, { jobs: [] });
+  const payload = JSON.stringify({
+    model: modelName,
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: maxTokens,
+    stream: false,
+    ...VLLM_GEN_KWARGS,
+  });
 
-  const { presignSeconds } = getCosConfig();
-  const jobs = [];
+  const url = `${vllmUrl}/v1/chat/completions`;
+  const mod = url.startsWith('https') ? https : http;
+  const urlObj = new URL(url);
 
-  for (const jobId of jobIds) {
-    const job = readJobSpec(jobId);
-    if (!job) { dequeue(jobId); continue; }
+  return new Promise((resolve, reject) => {
+    const req = mod.request({
+      hostname: urlObj.hostname, port: urlObj.port, path: urlObj.pathname,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      timeout: 300000,
+    }, (resp) => {
+      let data = '';
+      resp.on('data', c => data += c);
+      resp.on('end', () => {
+        if (resp.statusCode >= 400) return reject(new Error(`vLLM ${resp.statusCode}: ${data.substring(0, 300)}`));
+        try {
+          const parsed = JSON.parse(data);
+          const content = parsed.choices?.[0]?.message?.content?.trim() || '';
+          resolve({ content, usage: parsed.usage || {} });
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('vLLM request timeout')); });
+    req.write(payload);
+    req.end();
+  });
+}
 
-    const sourceKey = buildCosKey(`${jobId}/source.epub`);
-    const sourceDownloadUrl = cosPresignUrl({ method: 'GET', key: sourceKey, expiresSeconds: presignSeconds, headers: {} });
-    const bilingualKey = buildCosKey(`${jobId}/bilingual.epub`);
-    const bilingualUploadUrl = cosPresignUrl({ method: 'PUT', key: bilingualKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
-    const translatedKey = buildCosKey(`${jobId}/translated.epub`);
-    const translatedUploadUrl = cosPresignUrl({ method: 'PUT', key: translatedKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
+function buildChapterPrompt(texts, srcLang, tgtLang, context, glossary) {
+  const parts = [];
+  if (glossary && Object.keys(glossary).length > 0) {
+    parts.push('参考下面的翻译：\n' + Object.entries(glossary).map(([k, v]) => `${k} 翻译成 ${v}`).join('\n'));
+  }
+  const cnLangs = new Set(['zh', 'zh-cn', 'zh-tw', 'zh-hans', 'zh-hant']);
+  const isCn = cnLangs.has(srcLang.toLowerCase()) || cnLangs.has(tgtLang.toLowerCase());
 
-    let glossaryDownloadUrl = null;
-    if (job.engineType === 'AI' && job.useGlossary) {
+  if (context) {
+    parts.push(context);
+    parts.push(isCn
+      ? `参考上面的信息，把下面的文本翻译成${tgtLang}，注意不需要翻译上文，也不要额外解释。文本由${texts.length}个编号段落组成，请逐段翻译，每段翻译前保留对应的编号标记如[1] [2]等：`
+      : `Based on the context above, translate the following text into ${tgtLang}. Do not translate the context. The text has ${texts.length} numbered paragraphs. Translate each paragraph and keep the number markers like [1] [2] etc.`
+    );
+  } else {
+    parts.push(isCn
+      ? `将以下文本翻译为${tgtLang}。文本由${texts.length}个编号段落组成。请逐段翻译，每段翻译前保留对应的编号标记如[1] [2]等，只输出翻译结果，不要额外解释：`
+      : `Translate the following text into ${tgtLang}. The text has ${texts.length} numbered paragraphs. Translate each paragraph, keep the number markers like [1] [2] etc, and output only the translation without additional explanation.`
+    );
+  }
+  parts.push(texts.map((t, i) => `[${i + 1}] ${t}`).join('\n\n'));
+  return parts.join('\n\n');
+}
+
+function parseNumberedOutput(raw, expectedCount) {
+  const patterns = [
+    /\[(\d+)\]\s*/g,
+    /\((\d+)\)\s*/g,
+    /（(\d+)）\s*/g,
+    /^(\d+)[.、:：)\]]\s*/gm,
+  ];
+  let bestResult = {}, bestMatched = 0;
+  for (const pattern of patterns) {
+    pattern.lastIndex = 0;
+    const matches = [...raw.matchAll(pattern)];
+    if (!matches.length) continue;
+    const result = {};
+    for (let mi = 0; mi < matches.length; mi++) {
+      const num = parseInt(matches[mi][1], 10);
+      const start = matches[mi].index + matches[mi][0].length;
+      const end = mi + 1 < matches.length ? matches[mi + 1].index : raw.length;
+      const text = raw.substring(start, end).trim();
+      if (num >= 1 && num <= expectedCount && text) result[num] = text;
+    }
+    if (Object.keys(result).length > bestMatched) {
+      bestMatched = Object.keys(result).length;
+      bestResult = result;
+    }
+  }
+  if (Object.keys(bestResult).length > 0) return bestResult;
+
+  for (const sep of ['\n\n', '\n']) {
+    const parts = raw.split(sep).map(p => p.trim()).filter(Boolean);
+    if (parts.length >= expectedCount * 0.5) {
+      const result = {};
+      parts.forEach((p, i) => { if (i < expectedCount) result[i + 1] = p; });
+      return result;
+    }
+  }
+  return {};
+}
+
+async function translateVllmChapter(texts, srcLang, tgtLang, context, glossary) {
+  if (!texts.length) return [];
+  const nonEmpty = [];
+  texts.forEach((t, i) => { if (t && t.trim()) nonEmpty.push({ i, t }); });
+  if (!nonEmpty.length) return [...texts];
+
+  const maxModelLen = parseInt(process.env.VLLM_MAX_MODEL_LEN || '8192', 10);
+  const maxChapterChars = parseInt(process.env.VLLM_MAX_CHAPTER_INPUT_CHARS || String(Math.floor(maxModelLen / 3 * 1.5 * 2)), 10);
+  const maxOutputTokens = Math.min(parseInt(process.env.VLLM_MAX_OUTPUT_TOKENS || '4096', 10), Math.floor(maxModelLen / 2));
+
+  // Split into chunks by paragraph count + char count
+  const chunks = [];
+  let curChunk = [], curLen = 0;
+  for (const item of nonEmpty) {
+    if (curChunk.length && (curChunk.length >= MAX_CHAPTER_PARAGRAPHS || curLen + item.t.length > maxChapterChars)) {
+      chunks.push(curChunk);
+      curChunk = []; curLen = 0;
+    }
+    curChunk.push(item);
+    curLen += item.t.length;
+  }
+  if (curChunk.length) chunks.push(curChunk);
+
+  const results = [...texts];
+  for (let ci = 0; ci < chunks.length; ci++) {
+    const chunk = chunks[ci];
+    const chunkTexts = chunk.map(item => item.t);
+    const totalChars = chunkTexts.reduce((s, t) => s + t.length, 0);
+    const prompt = buildChapterPrompt(chunkTexts, srcLang, tgtLang, context, glossary);
+    const maxNew = Math.min(Math.max(totalChars * 4, 256), maxOutputTokens);
+
+    try {
+      const { content: rawResult } = await callVllmChat(prompt, maxNew);
+      const map = parseNumberedOutput(rawResult, chunkTexts.length);
+      for (let j = 0; j < chunk.length; j++) {
+        const paraNum = j + 1;
+        if (map[paraNum] && map[paraNum].trim()) {
+          let result = map[paraNum].trim();
+          const noteIdx = result.indexOf('（注');
+          if (noteIdx !== -1) result = result.substring(0, noteIdx).trim();
+          results[chunk[j].i] = result;
+        }
+      }
+    } catch (e) {
+      console.error(`[vllm] Chunk ${ci + 1}/${chunks.length} failed: ${e.message}`);
+    }
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// 翻译引擎: 在线 AI (腾讯混元翻译 API)
+// ---------------------------------------------------------------------------
+
+function callHunyuanTranslation(text, srcLang, tgtLang, references) {
+  return new Promise((resolve, reject) => {
+    const secretId = (process.env.TENCENT_SECRET_ID || '').trim();
+    const secretKey = (process.env.TENCENT_SECRET_KEY || '').trim();
+    if (!secretId || !secretKey) return reject(new Error('TENCENT_SECRET_ID/KEY not configured'));
+
+    const service = 'hunyuan';
+    const host = 'hunyuan.tencentcloudapi.com';
+    const action = 'ChatTranslations';
+    const version = '2023-09-01';
+    const region = (process.env.HY_REGION || 'ap-guangzhou').trim();
+    const model = (process.env.HY_TRANSLATION_MODEL || 'hunyuan-translation').trim();
+
+    const langMap = {
+      en: 'en', fr: 'fr', de: 'de', es: 'es', ja: 'ja', it: 'it', ko: 'ko',
+      pt: 'pt', ar: 'ar', nl: 'nl', ru: 'ru', th: 'th', vi: 'vi',
+      zh: 'zh', 'zh-cn': 'zh', 'zh-tw': 'zh-TR', 'zh-hans': 'zh', 'zh-hant': 'zh-TR',
+    };
+    const hySrc = srcLang !== 'auto' ? (langMap[srcLang.toLowerCase()] || srcLang) : undefined;
+    const hyTgt = langMap[tgtLang.toLowerCase()] || tgtLang;
+
+    const payload = { Model: model, Stream: false, Text: text };
+    if (hySrc) payload.Source = hySrc;
+    if (hyTgt) payload.Target = hyTgt;
+    if (references && references.length > 0) payload.References = references.slice(0, 10);
+    const payloadJson = JSON.stringify(payload);
+
+    const ts = Math.floor(Date.now() / 1000);
+    const headers = buildTc3Auth({
+      secretId, secretKey, service, host,
+      action, version, region, timestampSeconds: ts, payloadJson,
+    });
+
+    const reqObj = https.request({
+      hostname: host, method: 'POST', path: '/', headers,
+    }, (resp) => {
+      let data = '';
+      resp.on('data', c => data += c);
+      resp.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          const response = parsed.Response || parsed;
+          if (response.Error) return reject(new Error(`${response.Error.Code}: ${response.Error.Message}`));
+          const choices = response.Choices || [];
+          if (choices.length > 0) {
+            const msg = choices[0].Message || choices[0].Delta || {};
+            const content = msg.Content || '';
+            if (content) return resolve(content);
+          }
+          reject(new Error('Empty response from Hunyuan'));
+        } catch (e) { reject(e); }
+      });
+    });
+    reqObj.on('error', reject);
+    reqObj.write(payloadJson);
+    reqObj.end();
+  });
+}
+
+const _activeJobs = new Set();
+
+async function processTranslationJob(jobId) {
+  if (_activeJobs.has(jobId)) return;
+  _activeJobs.add(jobId);
+
+  const tag = jobId.substring(0, 8);
+  const spec = readJobSpec(jobId);
+  if (!spec) { _activeJobs.delete(jobId); return; }
+
+  const engineType = normalizeEngineType(spec.engineType);
+  const engineLabel = { MACHINE: 'machine', AI: 'vllm', AI_ONLINE: 'online-ai' }[engineType] || 'machine';
+
+  const sem = getSemaphore(engineType);
+  console.log(`[${engineLabel}][${tag}] Waiting for semaphore (running=${sem.running}, waiting=${sem.waiting})...`);
+  await sem.acquire();
+  console.log(`[${engineLabel}][${tag}] Acquired semaphore slot`);
+
+  try {
+    const cosUrls = (() => {
+      const { presignSeconds } = getCosConfig();
+      const sourceKey = buildCosKey(`${jobId}/source.epub`);
+      const sourceDownloadUrl = cosPresignUrl({ method: 'GET', key: sourceKey, expiresSeconds: presignSeconds, headers: {} });
+      const bilingualKey = buildCosKey(`${jobId}/bilingual.epub`);
+      const bilingualUploadUrl = cosPresignUrl({ method: 'PUT', key: bilingualKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
+      const translatedKey = buildCosKey(`${jobId}/translated.epub`);
+      const translatedUploadUrl = cosPresignUrl({ method: 'PUT', key: translatedKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
+      return { sourceDownloadUrl, bilingualUploadUrl, translatedUploadUrl };
+    })();
+
+    console.log(`[${engineLabel}][${tag}] Starting translation (engine=${engineType})`);
+
+    let progress = readProgress(jobId);
+    if (!progress) return;
+    progress.state = 'PARSING';
+    progress.percent = 1;
+    progress.updatedAt = new Date().toISOString();
+    writeProgress(jobId, progress);
+
+    const tmpDir = path.join(DATA_DIR, 'tmp', jobId);
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const sourceEpub = path.join(tmpDir, 'source.epub');
+    await downloadFile(cosUrls.sourceDownloadUrl, sourceEpub);
+
+    const unpackDir = path.join(tmpDir, 'unpacked');
+    await unzipEpub(sourceEpub, unpackDir);
+
+    // 下载术语表 (AI个人 或 AI在线 + useGlossary)
+    let glossary = null;
+    if (isAiEngine(engineType) && spec.useGlossary) {
       const glossaryKey = buildCosKey(`${jobId}/glossary.json`);
-      glossaryDownloadUrl = cosPresignUrl({ method: 'GET', key: glossaryKey, expiresSeconds: presignSeconds, headers: {} });
+      const { presignSeconds } = getCosConfig();
+      const glossaryUrl = cosPresignUrl({ method: 'GET', key: glossaryKey, expiresSeconds: presignSeconds, headers: {} });
+      try {
+        const glossaryPath = path.join(tmpDir, 'glossary.json');
+        await downloadFile(glossaryUrl, glossaryPath);
+        glossary = JSON.parse(fs.readFileSync(glossaryPath, 'utf-8'));
+        console.log(`[${engineLabel}][${tag}] Loaded glossary with ${Object.keys(glossary).length} entries`);
+      } catch (e) { console.log(`[${engineLabel}][${tag}] Glossary download failed: ${e.message}`); }
     }
 
-    jobs.push({
-      jobId,
-      job,
-      cos: { sourceDownloadUrl, bilingualUploadUrl, translatedUploadUrl, glossaryDownloadUrl },
-    });
-  }
+    const htmlFiles = findHtmlFiles(unpackDir);
+    if (htmlFiles.length === 0) {
+      console.log(`[${engineLabel}][${tag}] No HTML files found`);
+      progress.state = 'DONE'; progress.percent = 100;
+      progress.updatedAt = new Date().toISOString();
+      writeProgress(jobId, progress);
+      cleanupDir(tmpDir);
+      return;
+    }
 
-  return sendJson(res, 200, { jobs });
-}
-
-// ---------------------------------------------------------------------------
-// Worker API: POST /worker/progress  — 更新任务进度
-// ---------------------------------------------------------------------------
-
-function handleWorkerProgress(req, res, body) {
-  if (!verifyWorkerKey(req)) return sendJson(res, 403, { error: 'Forbidden' });
-
-  const jobId = String(body.jobId || '').trim();
-  if (!jobId) return sendJson(res, 400, { error: 'BadRequest', message: 'jobId required' });
-
-  const progress = readProgress(jobId);
-  if (!progress) return sendJson(res, 404, { error: 'NotFound' });
-
-  // 合并更新
-  if (body.state) progress.state = body.state;
-  if (body.percent != null) progress.percent = Number(body.percent);
-  if (body.chapterIndex != null) progress.chapterIndex = Number(body.chapterIndex);
-  if (body.chapterTotal != null) progress.chapterTotal = Number(body.chapterTotal);
-  if (body.engineType) progress.engineType = body.engineType;
-  if (body.output) progress.output = body.output;
-  progress.updatedAt = new Date().toISOString();
-
-  writeProgress(jobId, progress);
-  return sendJson(res, 200, { ok: true });
-}
-
-// ---------------------------------------------------------------------------
-// Worker API: POST /worker/complete  — 任务完成
-// ---------------------------------------------------------------------------
-
-function handleWorkerComplete(req, res, body) {
-  if (!verifyWorkerKey(req)) return sendJson(res, 403, { error: 'Forbidden' });
-
-  const jobId = String(body.jobId || '').trim();
-  if (!jobId) return sendJson(res, 400, { error: 'BadRequest', message: 'jobId required' });
-
-  const progress = readProgress(jobId);
-  if (!progress) return sendJson(res, 404, { error: 'NotFound' });
-
-  progress.state = 'DONE';
-  progress.percent = 100;
-  progress.updatedAt = new Date().toISOString();
-  writeProgress(jobId, progress);
-
-  // 从队列移除
-  dequeue(jobId);
-
-  return sendJson(res, 200, { ok: true });
-}
-
-// ---------------------------------------------------------------------------
-// Worker API: POST /worker/fail  — 任务失败
-// ---------------------------------------------------------------------------
-
-function handleWorkerFail(req, res, body) {
-  if (!verifyWorkerKey(req)) return sendJson(res, 403, { error: 'Forbidden' });
-
-  const jobId = String(body.jobId || '').trim();
-  if (!jobId) return sendJson(res, 400, { error: 'BadRequest', message: 'jobId required' });
-
-  const progress = readProgress(jobId);
-  if (!progress) return sendJson(res, 404, { error: 'NotFound' });
-
-  progress.state = 'FAILED';
-  progress.error = body.error || { code: 'JOB_FAILED', message: 'Unknown error' };
-  progress.updatedAt = new Date().toISOString();
-  writeProgress(jobId, progress);
-
-  // 从队列移除
-  dequeue(jobId);
-
-  // 自动退还积分
-  const job = readJobSpec(jobId);
-  if (job && job.pointsDeducted > 0 && job.deviceId) {
-    const cur = readPointsBalance(job.deviceId);
-    writePointsBalance(job.deviceId, cur + job.pointsDeducted);
-    progress._refunded = true;
-    progress.refundedPoints = job.pointsDeducted;
+    console.log(`[${engineLabel}][${tag}] Found ${htmlFiles.length} HTML files`);
+    progress.state = 'TRANSLATING'; progress.percent = 2;
+    progress.chapterTotal = htmlFiles.length;
+    progress.engineType = engineType;
+    progress.updatedAt = new Date().toISOString();
     writeProgress(jobId, progress);
+
+    const outputMode = spec.output || 'BILINGUAL';
+    let contextPairs = [];
+
+    for (let ci = 0; ci < htmlFiles.length; ci++) {
+      const curProgress = readProgress(jobId);
+      if (!curProgress || curProgress.state === 'CANCELED') {
+        console.log(`[${engineLabel}][${tag}] Job cancelled, stopping`);
+        cleanupDir(tmpDir);
+        return;
+      }
+
+      const chapterNum = ci + 1;
+      const htmlPath = htmlFiles[ci];
+
+      const percentStart = Math.max(3, Math.min(98, Math.floor((ci / htmlFiles.length) * 100)));
+      progress.state = 'TRANSLATING'; progress.percent = percentStart;
+      progress.chapterIndex = chapterNum; progress.chapterTotal = htmlFiles.length;
+      progress.updatedAt = new Date().toISOString();
+      writeProgress(jobId, progress);
+
+      console.log(`[${engineLabel}][${tag}] Chapter ${chapterNum}/${htmlFiles.length}: ${path.basename(htmlPath)}`);
+
+      const { texts: originalTexts, writeBack } = extractAndPrepare(htmlPath);
+      if (!originalTexts || originalTexts.length === 0) continue;
+
+      let translatedTexts;
+      if (engineType === 'AI') {
+        const ctx = renderContext(contextPairs);
+        translatedTexts = await translateVllmChapter(originalTexts, spec.sourceLang || 'auto', spec.targetLang || 'zh', ctx, glossary);
+        updateContextPairs(contextPairs, originalTexts, translatedTexts);
+      } else if (engineType === 'AI_ONLINE') {
+        translatedTexts = await translateOnlineChapter(originalTexts, spec.sourceLang || 'auto', spec.targetLang || 'zh', glossary);
+      } else {
+        translatedTexts = await translateMachine(originalTexts, spec.sourceLang || 'auto', spec.targetLang || 'zh');
+      }
+
+      writeBack(translatedTexts, outputMode);
+
+      const percentDone = Math.max(3, Math.min(99, Math.floor(((ci + 1) / htmlFiles.length) * 100)));
+      progress.percent = percentDone; progress.chapterIndex = chapterNum;
+      progress.updatedAt = new Date().toISOString();
+      writeProgress(jobId, progress);
+    }
+
+    console.log(`[${engineLabel}][${tag}] Repacking EPUB...`);
+    progress.state = 'PACKAGING'; progress.percent = 99;
+    progress.chapterIndex = htmlFiles.length;
+    progress.updatedAt = new Date().toISOString();
+    writeProgress(jobId, progress);
+
+    const resultEpub = path.join(tmpDir, 'result.epub');
+    await zipEpub(unpackDir, resultEpub);
+
+    console.log(`[${engineLabel}][${tag}] Uploading result...`);
+    progress.state = 'UPLOADING_RESULT';
+    progress.updatedAt = new Date().toISOString();
+    writeProgress(jobId, progress);
+
+    const uploadUrl = outputMode.toUpperCase() === 'BILINGUAL' ? cosUrls.bilingualUploadUrl : cosUrls.translatedUploadUrl;
+    await uploadFile(uploadUrl, resultEpub);
+
+    progress.state = 'DONE'; progress.percent = 100;
+    progress.updatedAt = new Date().toISOString();
+    writeProgress(jobId, progress);
+    console.log(`[${engineLabel}][${tag}] === DONE ===`);
+
+    cleanupDir(tmpDir);
+  } catch (e) {
+    console.error(`[${engineLabel}][${tag}] FAILED:`, e.message || e);
+    const progress = readProgress(jobId) || {};
+    progress.state = 'FAILED';
+    progress.error = { code: 'TRANSLATION_FAILED', message: String(e.message || e) };
+    progress.updatedAt = new Date().toISOString();
+    writeProgress(jobId, progress);
+    if (spec && spec.pointsDeducted > 0) {
+      const refundTo = spec.ownerId || spec.deviceId;
+      if (refundTo) {
+        const cur = readPointsBalance(refundTo);
+        writePointsBalance(refundTo, cur + spec.pointsDeducted);
+        progress._refunded = true;
+        progress.refundedPoints = spec.pointsDeducted;
+        writeProgress(jobId, progress);
+      }
+    }
+    cleanupDir(path.join(DATA_DIR, 'tmp', jobId));
+  } finally {
+    sem.release();
+    _activeJobs.delete(jobId);
+    console.log(`[${engineLabel}][${tag}] Released semaphore slot`);
+  }
+}
+
+function renderContext(pairs) {
+  if (!pairs.length) return null;
+  return pairs.map(([src, tgt]) => `${src}\n${tgt}`).join('\n');
+}
+
+function updateContextPairs(pairs, originals, translations) {
+  for (let i = 0; i < originals.length && i < translations.length; i++) {
+    if (originals[i]?.trim() && translations[i]?.trim()) {
+      pairs.push([originals[i].trim(), translations[i].trim()]);
+    }
+  }
+  const maxModelLen = parseInt(process.env.VLLM_MAX_MODEL_LEN || '8192', 10);
+  const budget = Math.floor(maxModelLen / 4 * 1.5);
+  let total = 0, keepFrom = pairs.length;
+  for (let i = pairs.length - 1; i >= 0; i--) {
+    const pairLen = pairs[i][0].length + pairs[i][1].length + 2;
+    if (total + pairLen > budget) break;
+    total += pairLen;
+    keepFrom = i;
+  }
+  if (keepFrom > 0) pairs.splice(0, keepFrom);
+}
+
+function glossaryToReferences(glossary) {
+  if (!glossary || typeof glossary !== 'object') return null;
+  const entries = Object.entries(glossary);
+  if (entries.length === 0) return null;
+  return entries.slice(0, 10).map(([text, translation]) => ({
+    Type: 'term', Text: text, Translation: translation,
+  }));
+}
+
+const ONLINE_MAX_PARAGRAPHS = 50;
+const ONLINE_MAX_CHARS = 50000;
+
+function buildOnlineNumberedText(texts) {
+  return texts.map((t, i) => `[${i + 1}] ${t}`).join('\n\n');
+}
+
+async function translateOnlineChapter(texts, srcLang, tgtLang, glossary) {
+  if (!texts || texts.length === 0) return [];
+
+  const nonEmpty = [];
+  texts.forEach((t, i) => { if (t && t.trim()) nonEmpty.push({ i, t }); });
+  if (!nonEmpty.length) return [...texts];
+
+  const refs = glossaryToReferences(glossary);
+
+  const chunks = [];
+  let curChunk = [], curLen = 0;
+  for (const item of nonEmpty) {
+    if (curChunk.length && (curChunk.length >= ONLINE_MAX_PARAGRAPHS || curLen + item.t.length > ONLINE_MAX_CHARS)) {
+      chunks.push(curChunk);
+      curChunk = []; curLen = 0;
+    }
+    curChunk.push(item);
+    curLen += item.t.length;
+  }
+  if (curChunk.length) chunks.push(curChunk);
+
+  const results = [...texts];
+  for (let ci = 0; ci < chunks.length; ci++) {
+    const chunk = chunks[ci];
+    const chunkTexts = chunk.map(item => item.t);
+    const numberedText = buildOnlineNumberedText(chunkTexts);
+
+    try {
+      const rawResult = await callHunyuanTranslation(numberedText, srcLang, tgtLang, refs);
+      const map = parseNumberedOutput(rawResult, chunkTexts.length);
+      let matched = 0;
+      for (let j = 0; j < chunk.length; j++) {
+        const paraNum = j + 1;
+        if (map[paraNum] && map[paraNum].trim()) {
+          results[chunk[j].i] = map[paraNum].trim();
+          matched++;
+        }
+      }
+      console.log(`[online-ai] Chunk ${ci + 1}/${chunks.length}: ${chunkTexts.length} paragraphs, matched ${matched}`);
+
+      // 未匹配的段落逐段补翻
+      if (matched < chunkTexts.length) {
+        const unmatched = chunk.filter((_, j) => !map[j + 1] || !map[j + 1].trim());
+        if (unmatched.length > 0) {
+          console.log(`[online-ai] Chunk ${ci + 1}: ${unmatched.length} unmatched, translating individually`);
+          const fallbackPromises = unmatched.map(item =>
+            callHunyuanTranslation(item.t, srcLang, tgtLang, refs).catch(() => item.t)
+          );
+          const fallbackResults = await Promise.all(fallbackPromises);
+          unmatched.forEach((item, fi) => { results[item.i] = fallbackResults[fi]; });
+        }
+      }
+    } catch (e) {
+      console.error(`[online-ai] Chunk ${ci + 1}/${chunks.length} failed: ${e.message}, falling back to per-paragraph`);
+      const promises = chunk.map(item =>
+        callHunyuanTranslation(item.t, srcLang, tgtLang, refs).catch(() => item.t)
+      );
+      const fallbackResults = await Promise.all(promises);
+      chunk.forEach((item, fi) => { results[item.i] = fallbackResults[fi]; });
+    }
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// EPUB 处理辅助 (服务端内嵌)
+// ---------------------------------------------------------------------------
+
+function downloadFile(url, localPath) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith('https') ? https : http;
+    const req = mod.get(url, { timeout: 300000 }, (resp) => {
+      if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+        return downloadFile(resp.headers.location, localPath).then(resolve).catch(reject);
+      }
+      if (resp.statusCode >= 400) return reject(new Error(`Download failed: ${resp.statusCode}`));
+      const ws = fs.createWriteStream(localPath);
+      resp.pipe(ws);
+      ws.on('finish', resolve);
+      ws.on('error', reject);
+    });
+    req.on('error', reject);
+  });
+}
+
+function uploadFile(url, localPath) {
+  return new Promise((resolve, reject) => {
+    const fileSize = fs.statSync(localPath).size;
+    const fileStream = fs.createReadStream(localPath);
+    const mod = url.startsWith('https') ? https : http;
+    const urlObj = new URL(url);
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port,
+      path: urlObj.pathname + urlObj.search,
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/epub+zip', 'Content-Length': fileSize },
+    };
+    const req = mod.request(options, (resp) => {
+      let data = '';
+      resp.on('data', c => data += c);
+      resp.on('end', () => {
+        if (resp.statusCode >= 200 && resp.statusCode < 300) resolve();
+        else reject(new Error(`Upload failed: ${resp.statusCode} ${data}`));
+      });
+    });
+    req.on('error', reject);
+    fileStream.pipe(req);
+  });
+}
+
+function cleanupDir(dir) {
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+}
+
+function unzipEpub(epubPath, destDir) {
+  const { execFile } = require('child_process');
+  fs.mkdirSync(destDir, { recursive: true });
+  return new Promise((resolve, reject) => {
+    execFile('unzip', ['-o', '-q', epubPath, '-d', destDir], { timeout: 60000 }, (err) => {
+      if (err) reject(err); else resolve();
+    });
+  });
+}
+
+function zipEpub(sourceDir, outputPath) {
+  const { exec } = require('child_process');
+  const mimetypePath = path.join(sourceDir, 'mimetype');
+  const run = (cmd) => new Promise((resolve, reject) => {
+    exec(cmd, { shell: true, timeout: 120000 }, (err) => { if (err) reject(err); else resolve(); });
+  });
+  if (fs.existsSync(mimetypePath)) {
+    return run(`cd "${sourceDir}" && zip -0 -X "${outputPath}" mimetype`)
+      .then(() => run(`cd "${sourceDir}" && zip -r -X "${outputPath}" . -x mimetype`));
+  }
+  return run(`cd "${sourceDir}" && zip -r -X "${outputPath}" .`);
+}
+
+function findHtmlFiles(unpackDir) {
+  const result = [];
+  const opfPath = findOpfFile(unpackDir);
+  if (opfPath) {
+    const opfContent = fs.readFileSync(opfPath, 'utf-8');
+    const opfDir = path.dirname(opfPath);
+    // Parse spine itemrefs
+    const spineMatch = opfContent.match(/<spine[^>]*>([\s\S]*?)<\/spine>/i);
+    if (spineMatch) {
+      const itemrefRe = /idref\s*=\s*"([^"]+)"/gi;
+      const idrefs = [];
+      let m;
+      while ((m = itemrefRe.exec(spineMatch[1])) !== null) idrefs.push(m[1]);
+
+      // Build id -> href map from manifest
+      const manifestMatch = opfContent.match(/<manifest[^>]*>([\s\S]*?)<\/manifest>/i);
+      const idMap = {};
+      if (manifestMatch) {
+        const itemRe = /<item\s[^>]*?id\s*=\s*"([^"]+)"[^>]*?href\s*=\s*"([^"]+)"[^>]*?\/?>/gi;
+        while ((m = itemRe.exec(manifestMatch[1])) !== null) idMap[m[1]] = m[2];
+      }
+
+      for (const idref of idrefs) {
+        const href = idMap[idref];
+        if (href && /\.(x?html?)$/i.test(href)) {
+          const fullPath = path.join(opfDir, decodeURIComponent(href));
+          if (fs.existsSync(fullPath)) result.push(fullPath);
+        }
+      }
+    }
   }
 
-  return sendJson(res, 200, { ok: true });
+  if (result.length === 0) {
+    // Fallback: scan for .xhtml/.html files
+    walkDir(unpackDir, (fp) => {
+      if (/\.(x?html?)$/i.test(fp)) result.push(fp);
+    });
+    result.sort();
+  }
+  return result;
+}
+
+function findOpfFile(dir) {
+  const containerPath = path.join(dir, 'META-INF', 'container.xml');
+  if (fs.existsSync(containerPath)) {
+    const content = fs.readFileSync(containerPath, 'utf-8');
+    const m = content.match(/full-path\s*=\s*"([^"]+\.opf)"/i);
+    if (m) {
+      const opf = path.join(dir, m[1]);
+      if (fs.existsSync(opf)) return opf;
+    }
+  }
+  let found = null;
+  walkDir(dir, (fp) => {
+    if (!found && fp.endsWith('.opf')) found = fp;
+  });
+  return found;
+}
+
+function walkDir(dir, callback) {
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fp = path.join(dir, entry.name);
+    if (entry.isDirectory()) walkDir(fp, callback);
+    else callback(fp);
+  }
+}
+
+function extractAndPrepare(htmlPath) {
+  const raw = fs.readFileSync(htmlPath, 'utf-8');
+  // Extract text nodes from <p>, <h1>-<h6>, <li>, <span>, <div>
+  const textRe = /<(p|h[1-6]|li|span|div|td|th|blockquote|figcaption)(\s[^>]*)?>([^<]+(?:<(?!\/?(?:p|h[1-6]|li|span|div|td|th|blockquote|figcaption))[^>]*>[^<]*)*)<\/\1>/gi;
+  const segments = [];
+  const positions = [];
+  let m;
+  while ((m = textRe.exec(raw)) !== null) {
+    const innerText = m[3].replace(/<[^>]+>/g, '').trim();
+    if (innerText.length > 0) {
+      segments.push(innerText);
+      positions.push({ start: m.index, end: m.index + m[0].length, fullMatch: m[0], tag: m[1], attrs: m[2] || '', inner: m[3] });
+    }
+  }
+
+  return {
+    texts: segments,
+    writeBack: (translatedTexts, outputMode) => {
+      let content = raw;
+      // Process in reverse to maintain positions
+      for (let i = positions.length - 1; i >= 0; i--) {
+        if (i >= translatedTexts.length) continue;
+        const pos = positions[i];
+        const translated = translatedTexts[i];
+        if (!translated || translated === segments[i]) continue;
+
+        let replacement;
+        if (outputMode.toUpperCase() === 'BILINGUAL') {
+          replacement = `${pos.fullMatch}\n<${pos.tag}${pos.attrs} class="translated">${translated}</${pos.tag}>`;
+        } else {
+          replacement = `<${pos.tag}${pos.attrs}>${translated}</${pos.tag}>`;
+        }
+        content = content.substring(0, pos.start) + replacement + content.substring(pos.end);
+      }
+      fs.writeFileSync(htmlPath, content, 'utf-8');
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,7 +1772,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,accept,x-worker-key,x-device-id,x-api-key,x-auth-token');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,accept,x-device-id,x-api-key,x-auth-token');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     res.end();
     return;
@@ -1246,19 +1879,15 @@ const server = http.createServer(async (req, res) => {
 
     // --- Config ---
     if (req.method === 'GET' && pathname === '/config') {
-      return sendJson(res, 200, loadConfig());
+      const cfg = loadConfig();
+      cfg.local_ai_available = isLocalAiAvailable();
+      return sendJson(res, 200, cfg);
     }
 
     // --- Checkin ---
     if (req.method === 'POST' && pathname === '/checkin') return handleCheckin(req, res, body);
     if (req.method === 'POST' && pathname === '/checkin/status') return handleCheckinStatus(req, res, body);
 
-    // --- Worker (internal) ---
-    if (req.method === 'GET' && pathname === '/worker/poll') return handleWorkerPoll(req, res);
-    if (req.method === 'GET' && pathname === '/worker/poll-batch') return handleWorkerPollBatch(req, res);
-    if (req.method === 'POST' && pathname === '/worker/progress') return handleWorkerProgress(req, res, body);
-    if (req.method === 'POST' && pathname === '/worker/complete') return handleWorkerComplete(req, res, body);
-    if (req.method === 'POST' && pathname === '/worker/fail') return handleWorkerFail(req, res, body);
   } catch (e) {
     return sendJson(res, 500, { error: 'InternalError', message: String(e?.message || e) });
   }

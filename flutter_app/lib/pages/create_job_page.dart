@@ -28,9 +28,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
   String _sourceLang = 'auto';
   String _targetLang = 'en';
   String _output = 'BILINGUAL';
-  bool _useContext = false;
   bool _useGlossary = false;
-  String _translateMode = 'PARAGRAPH'; // PARAGRAPH or CHAPTER
   String? _localCoverImage;
 
   // 术语表
@@ -44,6 +42,8 @@ class _CreateJobPageState extends State<CreateJobPage> {
   // 计费配置（从服务端读取）
   int _billingUnitChars = 1000;
   int _billingUnitCost = 1;
+  int _onlineMultiplier = 100;
+  bool _localAiAvailable = false;
 
   @override
   void initState() {
@@ -58,6 +58,11 @@ class _CreateJobPageState extends State<CreateJobPage> {
         setState(() {
           _billingUnitChars = (cfg['billing_unit_chars'] ?? 1000) as int;
           _billingUnitCost = (cfg['billing_unit_cost'] ?? 1) as int;
+          _onlineMultiplier = (cfg['online_ai_billing_multiplier'] ?? 100) as int;
+          _localAiAvailable = cfg['local_ai_available'] == true;
+          if (!_localAiAvailable && _engineType == 'AI') {
+            _engineType = 'AI_ONLINE';
+          }
         });
       }
     } catch (_) {}
@@ -84,9 +89,13 @@ class _CreateJobPageState extends State<CreateJobPage> {
   // 目标语言不包含 auto
   List<(String, String)> get _targetLanguages => _languages.where((e) => e.$1 != 'auto').toList();
 
+  bool get _isAI => _engineType == 'AI' || _engineType == 'AI_ONLINE';
+
   int get _estimatedPoints {
-    if (_engineType != 'AI' || _charCount <= 0) return 0;
-    return (_charCount / _billingUnitChars).ceil() * _billingUnitCost;
+    if (!_isAI || _charCount <= 0) return 0;
+    int unitCost = _billingUnitCost;
+    if (_engineType == 'AI_ONLINE') unitCost *= _onlineMultiplier;
+    return (_charCount / _billingUnitChars).ceil() * unitCost;
   }
 
   Future<void> _pickFile() async {
@@ -156,9 +165,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
         targetLang: _targetLang,
         sourceFileName: _fileName!,
         charCount: _charCount,
-        useContext: _engineType == 'AI' && _useContext,
-        useGlossary: _engineType == 'AI' && _useGlossary && _glossaryBytes != null,
-        translateMode: _engineType == 'AI' ? _translateMode : 'PARAGRAPH',
+        useGlossary: _isAI && _useGlossary && _glossaryBytes != null,
       );
 
       final uploadInfo = result['upload'] as Map<String, dynamic>;
@@ -168,7 +175,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
       await _api.uploadFile(uploadUrl, _fileBytes!, 'application/epub+zip');
 
       // 3. 上传术语表 (如有)
-      if (_engineType == 'AI' && _useGlossary && _glossaryBytes != null && result['glossaryUpload'] != null) {
+      if (_isAI && _useGlossary && _glossaryBytes != null && result['glossaryUpload'] != null) {
         final glossaryInfo = result['glossaryUpload'] as Map<String, dynamic>;
         await _api.uploadFile(glossaryInfo['url'] as String, _glossaryBytes!, 'application/json');
       }
@@ -257,6 +264,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
             const SizedBox(height: 12),
             EngineSelector(
               selected: _engineType,
+              localAiAvailable: _localAiAvailable,
               onChanged: (v) => setState(() => _engineType = v),
             ),
             const SizedBox(height: 24),
@@ -302,39 +310,19 @@ class _CreateJobPageState extends State<CreateJobPage> {
             ),
             const SizedBox(height: 24),
 
-            // ── AI 高级选项 (仅 AI 显示) ──
-            if (_engineType == 'AI') ...[
-              _sectionTitle('翻译粒度'),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  _modeChip(cs, '逐段翻译', 'PARAGRAPH'),
-                  const SizedBox(width: 12),
-                  _modeChip(cs, '章节翻译', 'CHAPTER'),
-                ],
-              ),
-              Padding(
-                padding: const EdgeInsets.only(top: 6, bottom: 12),
-                child: Text(
-                  _translateMode == 'CHAPTER'
-                      ? '将整章段落合并后翻译，上下文更连贯，翻译质量更高'
-                      : '逐段落单独翻译，速度更快，适合一般场景',
-                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                ),
-              ),
+            // ── AI 高级选项 ──
+            if (_isAI) ...[
               _sectionTitle('AI翻译高级选项'),
               const SizedBox(height: 8),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('启用上下文翻译', style: TextStyle(fontSize: 15)),
-                subtitle: Text('自动将前文作为上下文，提升连贯性', style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
-                value: _useContext,
-                onChanged: (v) => setState(() => _useContext = v),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
                 title: const Text('使用术语表', style: TextStyle(fontSize: 15)),
-                subtitle: Text('上传 JSON 格式术语表 {"原文": "译文", ...}', style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                subtitle: Text(
+                  _engineType == 'AI_ONLINE'
+                      ? '上传术语表确保专业术语翻译准确 (最多10条)'
+                      : '上传 JSON 格式术语表 {"原文": "译文", ...}',
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                ),
                 value: _useGlossary,
                 onChanged: (v) => setState(() => _useGlossary = v),
               ),
@@ -405,20 +393,6 @@ class _CreateJobPageState extends State<CreateJobPage> {
       decoration: InputDecoration(
         labelText: label,
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      ),
-    );
-  }
-
-  Widget _modeChip(ColorScheme cs, String label, String value) {
-    final selected = _translateMode == value;
-    return ChoiceChip(
-      label: Text(label),
-      selected: selected,
-      onSelected: (_) => setState(() => _translateMode = value),
-      selectedColor: cs.primaryContainer,
-      labelStyle: TextStyle(
-        color: selected ? cs.primary : cs.onSurfaceVariant,
-        fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
       ),
     );
   }

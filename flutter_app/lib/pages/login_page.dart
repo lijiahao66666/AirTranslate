@@ -15,7 +15,9 @@ class LoginPage extends StatefulWidget {
     final result = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.transparent,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
       builder: (_) => const LoginPage(),
     );
     return result == true;
@@ -192,11 +194,7 @@ class _LoginPageState extends State<LoginPage> {
     final bottomPadding = MediaQuery.of(context).viewInsets.bottom;
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+    return Padding(
       padding: EdgeInsets.only(
         left: 20,
         right: 20,

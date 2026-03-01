@@ -7,9 +7,7 @@ class Job {
   final String targetLang;
   final String sourceFileName;
   final int charCount;
-  final bool useContext;
   final bool useGlossary;
-  final String translateMode; // "PARAGRAPH" or "CHAPTER"
   final int pointsDeducted;
   final String createdAt;
   final String? coverImage;
@@ -24,9 +22,7 @@ class Job {
     required this.targetLang,
     required this.sourceFileName,
     this.charCount = 0,
-    this.useContext = false,
     this.useGlossary = false,
-    this.translateMode = 'PARAGRAPH',
     this.pointsDeducted = 0,
     required this.createdAt,
     this.coverImage,
@@ -44,9 +40,7 @@ class Job {
       targetLang: json['targetLang'] ?? '',
       sourceFileName: json['sourceFileName'] ?? '',
       charCount: (json['charCount'] ?? 0) is int ? json['charCount'] : int.tryParse('${json['charCount']}') ?? 0,
-      useContext: json['useContext'] == true,
       useGlossary: json['useGlossary'] == true,
-      translateMode: json['translateMode'] ?? 'PARAGRAPH',
       pointsDeducted: (json['pointsDeducted'] ?? 0) is int ? json['pointsDeducted'] : int.tryParse('${json['pointsDeducted']}') ?? 0,
       createdAt: json['createdAt'] ?? '',
       coverImage: json['coverImage'],
@@ -64,9 +58,7 @@ class Job {
       'targetLang': targetLang,
       'sourceFileName': sourceFileName,
       'charCount': charCount,
-      'useContext': useContext,
       'useGlossary': useGlossary,
-      'translateMode': translateMode,
       'pointsDeducted': pointsDeducted,
       'createdAt': createdAt,
       'coverImage': coverImage,
@@ -87,9 +79,7 @@ class Job {
       targetLang: targetLang,
       sourceFileName: sourceFileName,
       charCount: charCount,
-      useContext: useContext,
       useGlossary: useGlossary,
-      translateMode: translateMode,
       pointsDeducted: pointsDeducted,
       createdAt: createdAt,
       coverImage: coverImage ?? this.coverImage,
@@ -97,7 +87,11 @@ class Job {
     );
   }
 
-  String get engineLabel => engineType == 'AI' ? 'AI翻译' : '机器翻译';
+  String get engineLabel => switch (engineType) {
+    'AI' => 'AI·个人',
+    'AI_ONLINE' => 'AI·在线',
+    _ => '机器翻译',
+  };
   String get outputLabel => output == 'BILINGUAL' ? '双语' : '纯译文';
 
   String get langPairLabel {
