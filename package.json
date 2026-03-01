@@ -1,0 +1,16 @@
+{
+  "name": "airtranslate",
+  "version": "1.0.0",
+  "description": "EPUB translation service",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "test": "echo \"No tests configured\""
+  },
+  "dependencies": {
+    "cheerio": "1.0.0-rc.12"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

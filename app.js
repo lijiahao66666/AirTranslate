@@ -6,7 +6,7 @@
 // - COS: 仅用于 presign URL (EPUB 上传/下载/术语表)
 // - 翻译引擎 (三引擎独立并发，互不干扰):
 //   · 机器翻译 (10并发): Azure Edge → MyMemory → Google, 段落级
-//   · AI翻译·在线 (3并发): 腾讯混元翻译 API, 章节级逐段, 支持术语 References
+//   · AI翻译·在线 (3并发): 腾讯混元翻译 API, 章节级逐段, 支持术语库 GlossaryIDs
 //   · AI翻译·个人 (1并发): 通过 frp 内网穿透访问本地 vLLM, 章节级分块
 // - 端口 9001 (避免和 AirRead 的 9000 冲突)
 // =========================================================================
@@ -16,9 +16,10 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const cheerio = require('cheerio');
 
 // ---------------------------------------------------------------------------
-// 加载 .env 文件 (零依赖)
+// 加载 .env 文件 (依赖: cheerio 用于 EPUB HTML 解析)
 // ---------------------------------------------------------------------------
 
 (function loadEnv() {
@@ -508,9 +509,9 @@ const DEFAULT_CONFIG = {
   checkin_enabled: true,
   checkin_points: 5000,
   initial_grant_points: 500000,
-  billing_unit_chars: 1000,
+  billing_unit_chars: 100,      // 个人AI: 1积分/100字
   billing_unit_cost: 1,
-  online_ai_billing_multiplier: 100,
+  online_ai_billing_multiplier: 100,  // 在线AI: 1积分/字 (100积分/100字)
   local_ai_enabled: true,
   latest_version: '1.0.0',
   min_version: '1.0.0',
@@ -1093,9 +1094,10 @@ async function translateGoogle(texts, srcLang, tgtLang) {
 const VLLM_GEN_KWARGS = { top_k: 20, top_p: 0.6, temperature: 0.7, repetition_penalty: 1.05 };
 const MAX_CHAPTER_PARAGRAPHS = 20;
 
-function callVllmChat(prompt, maxTokens) {
+function callVllmChat(prompt, maxTokens, opts = {}) {
   const vllmUrl = (process.env.VLLM_API_URL || '').trim().replace(/\/+$/, '');
   const modelName = (process.env.VLLM_MODEL_NAME || 'HY-MT1.5').trim();
+  const logPrefix = opts.logPrefix || '[vllm]';
   if (!vllmUrl) return Promise.reject(new Error('VLLM_API_URL not configured'));
 
   const payload = JSON.stringify({
@@ -1109,6 +1111,7 @@ function callVllmChat(prompt, maxTokens) {
   const url = `${vllmUrl}/v1/chat/completions`;
   const mod = url.startsWith('https') ? https : http;
   const urlObj = new URL(url);
+  console.log(`${logPrefix} POST ${url} promptLen=${prompt.length} maxTokens=${maxTokens}`);
 
   return new Promise((resolve, reject) => {
     const req = mod.request({
@@ -1120,11 +1123,17 @@ function callVllmChat(prompt, maxTokens) {
       let data = '';
       resp.on('data', c => data += c);
       resp.on('end', () => {
-        if (resp.statusCode >= 400) return reject(new Error(`vLLM ${resp.statusCode}: ${data.substring(0, 300)}`));
+        if (resp.statusCode >= 400) {
+          console.error(`${logPrefix} vLLM error ${resp.statusCode}: ${data.substring(0, 500)}`);
+          return reject(new Error(`vLLM ${resp.statusCode}: ${data.substring(0, 300)}`));
+        }
         try {
           const parsed = JSON.parse(data);
           const content = parsed.choices?.[0]?.message?.content?.trim() || '';
-          resolve({ content, usage: parsed.usage || {} });
+          const usage = parsed.usage || {};
+          console.log(`${logPrefix} OK contentLen=${content.length} inputTokens=${usage.prompt_tokens || '-'} outputTokens=${usage.completion_tokens || '-'}`);
+          if (!content) console.warn(`${logPrefix} Empty response from vLLM`);
+          resolve({ content, usage });
         } catch (e) { reject(e); }
       });
     });
@@ -1137,8 +1146,10 @@ function callVllmChat(prompt, maxTokens) {
 
 function buildChapterPrompt(texts, srcLang, tgtLang, context, glossary) {
   const parts = [];
+  // 本地 AI 提示词最多支持 10 条术语，过多会超出上下文
   if (glossary && Object.keys(glossary).length > 0) {
-    parts.push('参考下面的翻译：\n' + Object.entries(glossary).map(([k, v]) => `${k} 翻译成 ${v}`).join('\n'));
+    const entries = Object.entries(glossary).slice(0, 10);
+    parts.push('参考下面的翻译：\n' + entries.map(([k, v]) => `${k} 翻译成 ${v}`).join('\n'));
   }
   const cnLangs = new Set(['zh', 'zh-cn', 'zh-tw', 'zh-hans', 'zh-hant']);
   const isCn = cnLangs.has(srcLang.toLowerCase()) || cnLangs.has(tgtLang.toLowerCase());
@@ -1201,8 +1212,10 @@ async function translateVllmChapter(texts, srcLang, tgtLang, context, glossary) 
   if (!texts.length) return [];
   const nonEmpty = [];
   texts.forEach((t, i) => { if (t && t.trim()) nonEmpty.push({ i, t }); });
-  if (!nonEmpty.length) return [...texts];
-
+  if (!nonEmpty.length) {
+    console.log('[vllm] Chapter has no translatable segments, returning original');
+    return [...texts];
+  }
   const maxModelLen = parseInt(process.env.VLLM_MAX_MODEL_LEN || '8192', 10);
   const maxChapterChars = parseInt(process.env.VLLM_MAX_CHAPTER_INPUT_CHARS || String(Math.floor(maxModelLen / 3 * 1.5 * 2)), 10);
   const maxOutputTokens = Math.min(parseInt(process.env.VLLM_MAX_OUTPUT_TOKENS || '4096', 10), Math.floor(maxModelLen / 2));
@@ -1219,6 +1232,7 @@ async function translateVllmChapter(texts, srcLang, tgtLang, context, glossary) 
     curLen += item.t.length;
   }
   if (curChunk.length) chunks.push(curChunk);
+  console.log(`[vllm] translateVllmChapter: ${texts.length} segments, ${nonEmpty.length} non-empty, ${chunks.length} chunks`);
 
   const results = [...texts];
   for (let ci = 0; ci < chunks.length; ci++) {
@@ -1229,8 +1243,12 @@ async function translateVllmChapter(texts, srcLang, tgtLang, context, glossary) 
     const maxNew = Math.min(Math.max(totalChars * 4, 256), maxOutputTokens);
 
     try {
-      const { content: rawResult } = await callVllmChat(prompt, maxNew);
+      const { content: rawResult } = await callVllmChat(prompt, maxNew, { logPrefix: `[vllm] Chunk ${ci + 1}/${chunks.length}` });
       const map = parseNumberedOutput(rawResult, chunkTexts.length);
+      const matchedCount = Object.keys(map).length;
+      if (matchedCount < chunkTexts.length) {
+        console.warn(`[vllm] Chunk ${ci + 1}/${chunks.length}: parsed ${matchedCount}/${chunkTexts.length} segments, raw length=${(rawResult || '').length}`);
+      }
       for (let j = 0; j < chunk.length; j++) {
         const paraNum = j + 1;
         if (map[paraNum] && map[paraNum].trim()) {
@@ -1240,8 +1258,39 @@ async function translateVllmChapter(texts, srcLang, tgtLang, context, glossary) 
           results[chunk[j].i] = result;
         }
       }
+      // 未匹配的段落逐段补翻（避免出现无译文）
+      const unmatched = chunk.filter((_, j) => !map[j + 1] || !map[j + 1].trim());
+      if (unmatched.length > 0) {
+        console.log(`[vllm] Chunk ${ci + 1}: ${unmatched.length} unmatched, translating individually`);
+        for (const item of unmatched) {
+          try {
+            const singlePrompt = buildChapterPrompt([item.t], srcLang, tgtLang, context, glossary);
+            const { content: singleRaw } = await callVllmChat(singlePrompt, Math.min(item.t.length * 4, 512), { logPrefix: `[vllm] Chunk ${ci + 1} single` });
+            const singleMap = parseNumberedOutput(singleRaw, 1);
+            if (singleMap[1] && singleMap[1].trim()) {
+              let r = singleMap[1].trim();
+              const ni = r.indexOf('（注');
+              if (ni !== -1) r = r.substring(0, ni).trim();
+              results[item.i] = r;
+            }
+          } catch (e) { console.warn(`[vllm] Single fallback failed for segment: ${e.message}`); }
+        }
+      }
     } catch (e) {
-      console.error(`[vllm] Chunk ${ci + 1}/${chunks.length} failed: ${e.message}`);
+      console.error(`[vllm] Chunk ${ci + 1}/${chunks.length} failed: ${e.message}, falling back to per-paragraph`);
+      for (const item of chunk) {
+        try {
+          const singlePrompt = buildChapterPrompt([item.t], srcLang, tgtLang, context, glossary);
+          const { content: singleRaw } = await callVllmChat(singlePrompt, Math.min(item.t.length * 4, 512), { logPrefix: `[vllm] Chunk ${ci + 1} fallback` });
+          const singleMap = parseNumberedOutput(singleRaw, 1);
+          if (singleMap[1] && singleMap[1].trim()) {
+            let r = singleMap[1].trim();
+            const ni = r.indexOf('（注');
+            if (ni !== -1) r = r.substring(0, ni).trim();
+            results[item.i] = r;
+          }
+        } catch (err) { console.warn(`[vllm] Fallback failed: ${err.message}`); }
+      }
     }
   }
   return results;
@@ -1251,36 +1300,30 @@ async function translateVllmChapter(texts, srcLang, tgtLang, context, glossary) 
 // 翻译引擎: 在线 AI (腾讯混元翻译 API)
 // ---------------------------------------------------------------------------
 
-function callHunyuanTranslation(text, srcLang, tgtLang, references) {
+function callHunyuanTranslation(text, srcLang, tgtLang, glossaryIds) {
   return new Promise((resolve, reject) => {
     const secretId = (process.env.TENCENT_SECRET_ID || '').trim();
     const secretKey = (process.env.TENCENT_SECRET_KEY || '').trim();
     if (!secretId || !secretKey) return reject(new Error('TENCENT_SECRET_ID/KEY not configured'));
 
-    const service = 'hunyuan';
     const host = 'hunyuan.tencentcloudapi.com';
     const action = 'ChatTranslations';
     const version = '2023-09-01';
     const region = (process.env.HY_REGION || 'ap-guangzhou').trim();
     const model = (process.env.HY_TRANSLATION_MODEL || 'hunyuan-translation').trim();
 
-    const langMap = {
-      en: 'en', fr: 'fr', de: 'de', es: 'es', ja: 'ja', it: 'it', ko: 'ko',
-      pt: 'pt', ar: 'ar', nl: 'nl', ru: 'ru', th: 'th', vi: 'vi',
-      zh: 'zh', 'zh-cn': 'zh', 'zh-tw': 'zh-TR', 'zh-hans': 'zh', 'zh-hant': 'zh-TR',
-    };
-    const hySrc = srcLang !== 'auto' ? (langMap[srcLang.toLowerCase()] || srcLang) : undefined;
-    const hyTgt = langMap[tgtLang.toLowerCase()] || tgtLang;
+    const hySrc = srcLang !== 'auto' ? toHunyuanLang(srcLang) : undefined;
+    const hyTgt = toHunyuanLang(tgtLang);
 
     const payload = { Model: model, Stream: false, Text: text };
     if (hySrc) payload.Source = hySrc;
     if (hyTgt) payload.Target = hyTgt;
-    if (references && references.length > 0) payload.References = references.slice(0, 10);
+    if (glossaryIds && glossaryIds.length > 0) payload.GlossaryIDs = glossaryIds.slice(0, 5);
     const payloadJson = JSON.stringify(payload);
 
     const ts = Math.floor(Date.now() / 1000);
     const headers = buildTc3Auth({
-      secretId, secretKey, service, host,
+      secretId, secretKey, service: 'hunyuan', host,
       action, version, region, timestampSeconds: ts, payloadJson,
     });
 
@@ -1328,6 +1371,7 @@ async function processTranslationJob(jobId) {
   await sem.acquire();
   console.log(`[${engineLabel}][${tag}] Acquired semaphore slot`);
 
+  let glossaryId = null; // 在线 AI 术语库 ID，翻译完成后需删除
   try {
     const cosUrls = (() => {
       const { presignSeconds } = getCosConfig();
@@ -1341,6 +1385,10 @@ async function processTranslationJob(jobId) {
     })();
 
     console.log(`[${engineLabel}][${tag}] Starting translation (engine=${engineType})`);
+    if (engineType === 'AI') {
+      const vllmUrl = (process.env.VLLM_API_URL || '').trim();
+      console.log(`[vllm][${tag}] VLLM_API_URL=${vllmUrl || '(not set)'}`);
+    }
 
     let progress = readProgress(jobId);
     if (!progress) return;
@@ -1368,6 +1416,10 @@ async function processTranslationJob(jobId) {
         await downloadFile(glossaryUrl, glossaryPath);
         glossary = JSON.parse(fs.readFileSync(glossaryPath, 'utf-8'));
         console.log(`[${engineLabel}][${tag}] Loaded glossary with ${Object.keys(glossary).length} entries`);
+        if (engineType === 'AI_ONLINE' && glossary && Object.keys(glossary).length > 0) {
+          glossaryId = await glossaryToHunyuanGlossary(glossary, spec.sourceLang || 'auto', spec.targetLang || 'zh', tag);
+          if (glossaryId) console.log(`[${engineLabel}][${tag}] Created Hunyuan glossary: ${glossaryId}`);
+        }
       } catch (e) { console.log(`[${engineLabel}][${tag}] Glossary download failed: ${e.message}`); }
     }
 
@@ -1419,12 +1471,17 @@ async function processTranslationJob(jobId) {
         translatedTexts = await translateVllmChapter(originalTexts, spec.sourceLang || 'auto', spec.targetLang || 'zh', ctx, glossary);
         updateContextPairs(contextPairs, originalTexts, translatedTexts);
       } else if (engineType === 'AI_ONLINE') {
-        translatedTexts = await translateOnlineChapter(originalTexts, spec.sourceLang || 'auto', spec.targetLang || 'zh', glossary);
+        const onlineGlossaryIds = glossaryId ? [glossaryId] : null;
+        translatedTexts = await translateOnlineChapter(originalTexts, spec.sourceLang || 'auto', spec.targetLang || 'zh', onlineGlossaryIds);
       } else {
         translatedTexts = await translateMachine(originalTexts, spec.sourceLang || 'auto', spec.targetLang || 'zh');
       }
 
       writeBack(translatedTexts, outputMode);
+      if (engineType === 'AI') {
+        const filled = translatedTexts.filter(t => t != null && String(t).trim()).length;
+        console.log(`[vllm][${tag}] Chapter ${chapterNum} wrote ${filled}/${originalTexts.length} translations`);
+      }
 
       const percentDone = Math.max(3, Math.min(99, Math.floor(((ci + 1) / htmlFiles.length) * 100)));
       progress.percent = percentDone; progress.chapterIndex = chapterNum;
@@ -1432,7 +1489,12 @@ async function processTranslationJob(jobId) {
       writeProgress(jobId, progress);
     }
 
-    console.log(`[${engineLabel}][${tag}] Repacking EPUB...`);
+    let totalHtmlBytes = 0;
+    for (const hp of htmlFiles) {
+      try { totalHtmlBytes += fs.statSync(hp).size; } catch (_) {}
+    }
+    console.log(`[${engineLabel}][${tag}] Repacking EPUB... (${htmlFiles.length} HTML files, ${totalHtmlBytes} bytes total)`);
+    if (totalHtmlBytes < 100) console.warn(`[${engineLabel}][${tag}] WARNING: HTML content very small (${totalHtmlBytes} bytes), possible empty content`);
     progress.state = 'PACKAGING'; progress.percent = 99;
     progress.chapterIndex = htmlFiles.length;
     progress.updatedAt = new Date().toISOString();
@@ -1474,6 +1536,12 @@ async function processTranslationJob(jobId) {
     }
     cleanupDir(path.join(DATA_DIR, 'tmp', jobId));
   } finally {
+    if (glossaryId) {
+      try {
+        await deleteGlossary(glossaryId);
+        console.log(`[${engineLabel}][${tag}] Deleted Hunyuan glossary: ${glossaryId}`);
+      } catch (e) { console.warn(`[${engineLabel}][${tag}] Delete glossary failed: ${e.message}`); }
+    }
     sem.release();
     _activeJobs.delete(jobId);
     console.log(`[${engineLabel}][${tag}] Released semaphore slot`);
@@ -1503,13 +1571,86 @@ function updateContextPairs(pairs, originals, translations) {
   if (keepFrom > 0) pairs.splice(0, keepFrom);
 }
 
-function glossaryToReferences(glossary) {
+// 混元语言码映射 (CreateGlossary/ChatTranslations)
+const HUNYUAN_LANG_MAP = {
+  en: 'en', fr: 'fr', de: 'de', es: 'es', ja: 'ja', it: 'it', ko: 'ko',
+  pt: 'pt', ar: 'ar', nl: 'nl', ru: 'ru', th: 'th', vi: 'vi',
+  zh: 'zh', 'zh-cn': 'zh', 'zh-tw': 'zh-TR', 'zh-hans': 'zh', 'zh-hant': 'zh-TR',
+};
+
+function toHunyuanLang(lang) {
+  if (!lang || lang === 'auto') return 'zh';
+  return HUNYUAN_LANG_MAP[lang.toLowerCase()] || lang;
+}
+
+/** 通用混元 API 调用 */
+function callHunyuanApi(action, payload) {
+  return new Promise((resolve, reject) => {
+    const secretId = (process.env.TENCENT_SECRET_ID || '').trim();
+    const secretKey = (process.env.TENCENT_SECRET_KEY || '').trim();
+    if (!secretId || !secretKey) return reject(new Error('TENCENT_SECRET_ID/KEY not configured'));
+    const host = 'hunyuan.tencentcloudapi.com';
+    const version = '2023-09-01';
+    const region = (process.env.HY_REGION || 'ap-guangzhou').trim();
+    const payloadJson = JSON.stringify(payload);
+    const ts = Math.floor(Date.now() / 1000);
+    const headers = buildTc3Auth({ secretId, secretKey, service: 'hunyuan', host, action, version, region, timestampSeconds: ts, payloadJson });
+    const reqObj = https.request({
+      hostname: host, method: 'POST', path: '/', headers,
+    }, (resp) => {
+      let data = '';
+      resp.on('data', c => data += c);
+      resp.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          const response = parsed.Response || parsed;
+          if (response.Error) return reject(new Error(`${response.Error.Code}: ${response.Error.Message}`));
+          resolve(response);
+        } catch (e) { reject(e); }
+      });
+    });
+    reqObj.on('error', reject);
+    reqObj.write(payloadJson);
+    reqObj.end();
+  });
+}
+
+/** 创建术语库，返回 GlossaryId */
+async function createGlossary(name, source, target) {
+  const resp = await callHunyuanApi('CreateGlossary', {
+    Name: name,
+    Source: toHunyuanLang(source),
+    Target: toHunyuanLang(target),
+  });
+  return resp.GlossaryId || resp.glossaryId;
+}
+
+/** 添加术语条目（单次最多100条） */
+async function createGlossaryEntries(glossaryId, entries) {
+  return callHunyuanApi('CreateGlossaryEntry', {
+    GlossaryId: glossaryId,
+    Entries: entries.map(([src, tgt]) => ({ SourceTerm: src, TargetTerm: tgt })),
+  });
+}
+
+/** 删除术语库 */
+async function deleteGlossary(glossaryId) {
+  return callHunyuanApi('DeleteGlossary', { GlossaryId: glossaryId });
+}
+
+/** 从 glossary 对象创建术语库，返回 glossaryId；无条目时返回 null */
+async function glossaryToHunyuanGlossary(glossary, srcLang, tgtLang, jobTag) {
   if (!glossary || typeof glossary !== 'object') return null;
-  const entries = Object.entries(glossary);
+  const entries = Object.entries(glossary).filter(([k, v]) => k && v && String(k).trim() && String(v).trim());
   if (entries.length === 0) return null;
-  return entries.slice(0, 10).map(([text, translation]) => ({
-    Type: 'term', Text: text, Translation: translation,
-  }));
+  const src = srcLang === 'auto' ? 'en' : srcLang;
+  const tgt = tgtLang || 'zh';
+  const glossaryId = await createGlossary(`at-${jobTag}`, src, tgt);
+  for (let i = 0; i < entries.length; i += 100) {
+    const batch = entries.slice(i, i + 100);
+    await createGlossaryEntries(glossaryId, batch);
+  }
+  return glossaryId;
 }
 
 const ONLINE_MAX_PARAGRAPHS = 50;
@@ -1519,14 +1660,12 @@ function buildOnlineNumberedText(texts) {
   return texts.map((t, i) => `[${i + 1}] ${t}`).join('\n\n');
 }
 
-async function translateOnlineChapter(texts, srcLang, tgtLang, glossary) {
+async function translateOnlineChapter(texts, srcLang, tgtLang, glossaryIds) {
   if (!texts || texts.length === 0) return [];
 
   const nonEmpty = [];
   texts.forEach((t, i) => { if (t && t.trim()) nonEmpty.push({ i, t }); });
   if (!nonEmpty.length) return [...texts];
-
-  const refs = glossaryToReferences(glossary);
 
   const chunks = [];
   let curChunk = [], curLen = 0;
@@ -1547,7 +1686,7 @@ async function translateOnlineChapter(texts, srcLang, tgtLang, glossary) {
     const numberedText = buildOnlineNumberedText(chunkTexts);
 
     try {
-      const rawResult = await callHunyuanTranslation(numberedText, srcLang, tgtLang, refs);
+      const rawResult = await callHunyuanTranslation(numberedText, srcLang, tgtLang, glossaryIds);
       const map = parseNumberedOutput(rawResult, chunkTexts.length);
       let matched = 0;
       for (let j = 0; j < chunk.length; j++) {
@@ -1565,7 +1704,7 @@ async function translateOnlineChapter(texts, srcLang, tgtLang, glossary) {
         if (unmatched.length > 0) {
           console.log(`[online-ai] Chunk ${ci + 1}: ${unmatched.length} unmatched, translating individually`);
           const fallbackPromises = unmatched.map(item =>
-            callHunyuanTranslation(item.t, srcLang, tgtLang, refs).catch(() => item.t)
+            callHunyuanTranslation(item.t, srcLang, tgtLang, glossaryIds).catch(() => item.t)
           );
           const fallbackResults = await Promise.all(fallbackPromises);
           unmatched.forEach((item, fi) => { results[item.i] = fallbackResults[fi]; });
@@ -1574,7 +1713,7 @@ async function translateOnlineChapter(texts, srcLang, tgtLang, glossary) {
     } catch (e) {
       console.error(`[online-ai] Chunk ${ci + 1}/${chunks.length} failed: ${e.message}, falling back to per-paragraph`);
       const promises = chunk.map(item =>
-        callHunyuanTranslation(item.t, srcLang, tgtLang, refs).catch(() => item.t)
+        callHunyuanTranslation(item.t, srcLang, tgtLang, glossaryIds).catch(() => item.t)
       );
       const fallbackResults = await Promise.all(promises);
       chunk.forEach((item, fi) => { results[item.i] = fallbackResults[fi]; });
@@ -1725,41 +1864,109 @@ function walkDir(dir, callback) {
   }
 }
 
+// EPUB HTML 解析 (cheerio, 兼容 XHTML/命名空间，对齐 Python epub_util)
+const SKIP_TAGS = new Set(['script', 'style', 'code', 'pre']);
+const TRANSLATION_CSS = `<style type="text/css">
+  .translation-container { display: block; }
+  .original-text { display: block; }
+  .translated-text { display: block; margin-top: 4px; color: #666; font-size: 1.0em; }
+</style>`;
+
+function loadHtml(raw) {
+  const isXhtml = raw.startsWith('<?xml') || /xmlns=/.test(raw.slice(0, 500)) || /<!DOCTYPE/i.test(raw.slice(0, 200));
+  return cheerio.load(raw, { xmlMode: !!isXhtml, decodeEntities: true });
+}
+
+function collectTextNodes($, bodyNode, segments, nodeRefs) {
+  const inTransContainer = (node) => {
+    let p = node.parent;
+    while (p) {
+      if (p.type === 'tag' && p.attribs && /translation-container/.test(p.attribs.class || '')) return true;
+      p = p.parent;
+    }
+    return false;
+  };
+  const isTranslatable = (t) => t && t.trim() && /[a-zA-Z\u4e00-\u9fff]/.test(t);
+  const walk = (node) => {
+    if (!node) return;
+    if (node.type === 'tag') {
+      const tag = (node.name || '').toLowerCase();
+      if (SKIP_TAGS.has(tag)) return;
+      if (/translation-container/.test(node.attribs?.class || '')) return;
+      for (const c of node.children || []) walk(c);
+    } else if (node.type === 'text') {
+      const t = (node.data || '').trim();
+      if (isTranslatable(t) && !inTransContainer(node)) {
+        segments.push(t);
+        nodeRefs.push(node);
+      }
+    }
+  };
+  walk(bodyNode);
+}
+
 function extractAndPrepare(htmlPath) {
   const raw = fs.readFileSync(htmlPath, 'utf-8');
-  // Extract text nodes from <p>, <h1>-<h6>, <li>, <span>, <div>
-  const textRe = /<(p|h[1-6]|li|span|div|td|th|blockquote|figcaption)(\s[^>]*)?>([^<]+(?:<(?!\/?(?:p|h[1-6]|li|span|div|td|th|blockquote|figcaption))[^>]*>[^<]*)*)<\/\1>/gi;
+  const $ = loadHtml(raw);
+  const body = $('body').get(0);
+  if (!body) return { texts: [], writeBack: () => {} };
+
   const segments = [];
-  const positions = [];
-  let m;
-  while ((m = textRe.exec(raw)) !== null) {
-    const innerText = m[3].replace(/<[^>]+>/g, '').trim();
-    if (innerText.length > 0) {
-      segments.push(innerText);
-      positions.push({ start: m.index, end: m.index + m[0].length, fullMatch: m[0], tag: m[1], attrs: m[2] || '', inner: m[3] });
-    }
+  const nodeRefs = [];
+  collectTextNodes($, body, segments, nodeRefs);
+
+  // 提取并保留 XML 声明、DOCTYPE（与 Python 一致）
+  let xmlDecl = '';
+  if (raw.startsWith('<?xml')) {
+    const end = raw.indexOf('?>') + 2;
+    xmlDecl = raw.slice(0, end);
+  }
+  let doctype = '';
+  const dtStart = raw.indexOf('<!DOCTYPE');
+  if (dtStart !== -1) {
+    const dtEnd = raw.indexOf('>', dtStart) + 1;
+    doctype = raw.slice(dtStart, dtEnd);
   }
 
   return {
     texts: segments,
     writeBack: (translatedTexts, outputMode) => {
-      let content = raw;
-      // Process in reverse to maintain positions
-      for (let i = positions.length - 1; i >= 0; i--) {
-        if (i >= translatedTexts.length) continue;
-        const pos = positions[i];
-        const translated = translatedTexts[i];
-        if (!translated || translated === segments[i]) continue;
-
-        let replacement;
-        if (outputMode.toUpperCase() === 'BILINGUAL') {
-          replacement = `${pos.fullMatch}\n<${pos.tag}${pos.attrs} class="translated">${translated}</${pos.tag}>`;
-        } else {
-          replacement = `<${pos.tag}${pos.attrs}>${translated}</${pos.tag}>`;
+      const isBilingual = outputMode.toUpperCase() === 'BILINGUAL';
+      if (isBilingual) {
+        const head = $('head');
+        if (head.length && !raw.includes('translation-container')) {
+          head.append(TRANSLATION_CSS);
         }
-        content = content.substring(0, pos.start) + replacement + content.substring(pos.end);
       }
-      fs.writeFileSync(htmlPath, content, 'utf-8');
+      const count = Math.min(nodeRefs.length, translatedTexts.length);
+      let replacedCount = 0;
+      for (let i = 0; i < count; i++) {
+        let translated = translatedTexts[i];
+        if (translated != null) translated = String(translated).trim();
+        if (!translated || translated === segments[i]) continue;
+        const node = nodeRefs[i];
+        const escaped = translated.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        if (isBilingual) {
+          const orig = (segments[i] || '').trim();
+          const container = $(`<div class="translation-container"></div>`);
+          container.append($(`<span class="original-text" data-translation="original">${orig.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>`));
+          container.append($(`<div class="translated-text" data-translation="translated">${escaped}</div>`));
+          $(node).replaceWith(container.get(0));
+        } else {
+          node.data = translated;
+        }
+        replacedCount++;
+      }
+      if (replacedCount === 0 && segments.length > 0) {
+        console.warn(`[writeBack] WARNING: ${path.basename(htmlPath)} has ${segments.length} segments but 0 written back (translatedTexts.len=${translatedTexts.length})`);
+      }
+      let out = $.html();
+      if (xmlDecl || doctype) {
+        if (xmlDecl) out = out.replace(xmlDecl, '');
+        if (doctype) out = out.replace(new RegExp(doctype.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), '');
+        out = (xmlDecl ? xmlDecl + '\n' : '') + (doctype ? doctype + '\n' : '') + out;
+      }
+      fs.writeFileSync(htmlPath, out, 'utf-8');
     },
   };
 }

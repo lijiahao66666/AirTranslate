@@ -98,6 +98,21 @@ class _CreateJobPageState extends State<CreateJobPage> {
     return (_charCount / _billingUnitChars).ceil() * unitCost;
   }
 
+  /// 费用预估显示的费率（从 config 动态：在线 1积分/字，个人 1积分/100字）
+  String get _billingRateText {
+    final nf = NumberFormat('#,###');
+    if (_engineType == 'AI_ONLINE') {
+      final cost = _billingUnitCost * _onlineMultiplier;
+      if (_billingUnitChars == 1) return '${nf.format(cost)}积分/字';
+      return '${nf.format(cost)}积分/${nf.format(_billingUnitChars)}字';
+    }
+    if (_engineType == 'AI') {
+      if (_billingUnitChars == 1) return '${nf.format(_billingUnitCost)}积分/字';
+      return '${nf.format(_billingUnitCost)}积分/${nf.format(_billingUnitChars)}字';
+    }
+    return '';
+  }
+
   Future<void> _pickFile() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -338,7 +353,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
                 ),
               const SizedBox(height: 12),
 
-              // 费用预估
+              // 费用预估（机器免费，AI 从 config 动态计算）
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(16),
@@ -351,8 +366,15 @@ class _CreateJobPageState extends State<CreateJobPage> {
                   children: [
                     Text('费用预估', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: cs.onSurface)),
                     const SizedBox(height: 8),
-                    Text('\ud83d\udcca ${fmt.format(_charCount)} \u5b57 \u00d7 $_billingUnitCost\u79ef\u5206/${fmt.format(_billingUnitChars)}\u5b57', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
-                    Text('💰 预计消耗: ${fmt.format(_estimatedPoints)} 积分', style: TextStyle(fontSize: 13, color: cs.primary, fontWeight: FontWeight.w500)),
+                    _isAI
+                        ? Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('📊 ${fmt.format(_charCount)} 字 × $_billingRateText', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+                              Text('💰 预计消耗: ${fmt.format(_estimatedPoints)} 积分', style: TextStyle(fontSize: 13, color: cs.primary, fontWeight: FontWeight.w500)),
+                            ],
+                          )
+                        : Text('机器翻译免费', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
                   ],
                 ),
               ),

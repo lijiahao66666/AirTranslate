@@ -1,0 +1,9 @@
+serverAddr = "122.51.10.98"
+serverPort = 7000
+
+[[proxies]]
+name = "vllm"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8000
+remotePort = 7001

@@ -6,7 +6,7 @@
 
 - 📖 **EPUB 全本翻译** — 上传书籍，自动翻译全部章节
 - 🧠 **AI 翻译·个人** — 本地 vLLM GPU 推理（通过 frp 内网穿透），支持术语表和上下文翻译
-- 🌐 **AI 翻译·在线** — 腾讯混元翻译 API，支持术语表（References），无需本地 GPU
+- 🌐 **AI 翻译·在线** — 腾讯混元翻译 API，支持术语库（GlossaryIDs），无需本地 GPU
 - 🤖 **机器翻译** — Azure Edge → MyMemory → Google 三引擎链式退避，完全免费
 - 📝 **双语/纯译文** — 支持双语对照和纯译文两种输出格式
 - 🌍 **33种语言** — 中英日韩法德西俄等主流语言全覆盖
@@ -22,8 +22,11 @@ AirTranslate/
 ├── config.json         # 运行时配置 (积分/版本/AI开关)
 ├── data/               # 本地数据 (积分/任务/进度)
 ├── flutter_app/        # Flutter 客户端 App
+├── frp/                # frp 内网穿透 (frpc.exe + frpc.toml)
 └── scripts/
-    └── start_vllm.sh   # WSL 中启动 vLLM (个人 AI 部署)
+    ├── start_local.ps1  # 一键启动本地 AI (frpc + vLLM)
+    ├── stop_local.ps1   # 一键停止本地 AI
+    └── start_vllm.sh    # WSL 中启动 vLLM (由 start_local.ps1 调用)
 ```
 
 ### 工作流程
@@ -58,7 +61,7 @@ AirTranslate/
 
 ### 服务端 (轻量服务器)
 - **规格**: 2核 2GB 即可
-- **Node.js**: 16+
+- **Node.js**: 18+ (推荐 20+；若用 Node 18 会使用 cheerio 1.0.0-rc.12 以兼容)
 - **PM2**: 进程管理 (推荐)
 - **系统工具**: `unzip`、`zip` 命令 (用于 EPUB 解压/打包)
 
@@ -99,9 +102,10 @@ SMS_TEMPLATE_ID=你的模板Id
 ### 2. 上传到服务器
 
 ```bash
-scp app.js .env root@your-server:/www/airtranslate/
+scp app.js package.json package-lock.json .env root@your-server:/www/airtranslate/
 ssh root@your-server
 cd /www/airtranslate
+npm install --omit=dev
 pm2 start app.js --name airtranslate
 pm2 save
 ```
@@ -119,34 +123,38 @@ curl http://your-server:9001/health
 
 ### 1. 下载模型
 
-从 HuggingFace 下载 [HY-MT1.5-7B-FP8](https://huggingface.co/tencent/HY-MT1.5-7B-FP8) 到 `~/models/` 目录。
+从 HuggingFace 下载 [HY-MT1.5-7B-FP8](https://huggingface.co/tencent/HY-MT1.5-7B-FP8) 到 WSL 的 `~/models/` 目录。
 
-### 2. 启动 vLLM（WSL）
+### 2. 配置 frp 目录
 
-```bash
-wsl -d Ubuntu -- bash scripts/start_vllm.sh
-```
+在项目根目录下新建 `frp/` 目录，从 [frp Releases](https://github.com/fatedier/frp/releases) 下载 Windows 版，将 `frpc.exe` 放入 `frp/` 中。
 
-验证 vLLM 是否正常运行：
+### 3. 服务端配置 frps
 
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8000/v1/models" -Method GET
-```
-
-### 3. 配置 frp 内网穿透
-
-在本地机器运行 frpc，将 vLLM 的 8000 端口穿透到公网服务器。
-
-**服务端 frps.toml:**
+在公网服务器上安装并运行 frps：
 
 ```toml
+# /etc/frp/frps.toml
 bindPort = 7000
 ```
 
-**本地 frpc.toml:**
+```bash
+# 用 systemd 管理
+sudo systemctl start frps
+```
+
+然后在服务端 `.env` 中配置穿透后的地址：
+
+```env
+VLLM_API_URL=http://127.0.0.1:7001
+```
+
+### 4. 本地配置 frpc
+
+编辑 `frp/frpc.toml`，填入服务器 IP：
 
 ```toml
-serverAddr = "your-server-ip"
+serverAddr = "你的服务器IP"
 serverPort = 7000
 
 [[proxies]]
@@ -157,13 +165,34 @@ localPort = 8000
 remotePort = 7001
 ```
 
-然后在服务端 `.env` 中配置：
+### 5. 一键启动
 
-```env
-VLLM_API_URL=http://127.0.0.1:7001
+```powershell
+.\scripts\start_local.ps1
 ```
 
-服务端会每 30 秒自动检测 vLLM 是否可达，在线时客户端会显示"个人部署"选项。
+脚本会从 `frp/` 目录启动 `frpc.exe` 并读取 `frpc.toml`，同时在 WSL 中后台启动 vLLM，日志输出到 `logs/` 目录。
+
+### 6. 停止
+
+```powershell
+.\scripts\stop_local.ps1
+```
+
+### 工作原理
+
+```
+本地机器                          公网服务器
+┌─────────┐    frp tunnel     ┌──────────┐
+│ vLLM    │◄──────────────────│ app.js   │
+│ :8000   │  (localPort:8000  │ 调用     │
+│ (WSL)   │   remotePort:7001)│ :7001    │
+└─────────┘                   └──────────┘
+     │                              │
+  frpc.exe ─────────────────► frps :7000
+```
+
+服务端每 30 秒自动检测 vLLM 是否可达，在线时客户端会显示"个人部署"选项，离线时自动隐藏。
 
 ## config.json 运行时配置
 
@@ -173,9 +202,9 @@ VLLM_API_URL=http://127.0.0.1:7001
   "checkin_enabled": true,        // 每日签到开关
   "checkin_points": 5000,         // 签到赠送积分
   "initial_grant_points": 500000, // 新用户赠送积分
-  "billing_unit_chars": 100,      // 计费单位 (字数)
+  "billing_unit_chars": 100,      // 个人AI: 1积分/100字
   "billing_unit_cost": 1,         // 每单位积分
-  "online_ai_billing_multiplier": 100 // 在线AI倍率
+  "online_ai_billing_multiplier": 100  // 在线AI: 1积分/字 (100积分/100字)
 }
 ```
 
@@ -205,7 +234,7 @@ VLLM_API_URL=http://127.0.0.1:7001
 
 ## 技术栈
 
-- **服务端**: Node.js (零依赖单文件, PM2 进程管理)
+- **服务端**: Node.js (cheerio EPUB 解析, PM2 进程管理)
 - **AI 推理**: vLLM (WSL2, OpenAI-compatible API) + frp 内网穿透
 - **AI 在线**: 腾讯混元翻译 API (ChatTranslations)
 - **AI 模型**: HY-MT1.5-7B-FP8 (腾讯混元翻译 v1.5)

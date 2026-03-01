@@ -1,6 +1,7 @@
 #!/bin/bash
 # 启动 vLLM 服务器 (在 WSL 中运行)
-# 用法: wsl -d Ubuntu -- bash /mnt/c/Users/28679/traeProjects/AirTranslate/worker/start_vllm.sh
+# 用法: 由 start_local.ps1 通过 WSL 调用，也可手动运行:
+#   wsl -d Ubuntu -- bash /path/to/AirTranslate/scripts/start_vllm.sh
 
 source ~/vllm-env/bin/activate
 
