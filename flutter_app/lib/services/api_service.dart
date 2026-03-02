@@ -12,8 +12,13 @@ class ApiService {
   static const _prefKey = 'server_base_url';
   static const _jobsCachePrefix = 'jobs_cache_v1_';
   static const _coversKey = 'jobs_local_covers_v1';
-  // TODO: 备案通过后改为 https://translate-api.air-inc.top
-  static const _defaultUrl = 'http://122.51.10.98:9001';
+  // 通过 --dart-define=AIRTRANSLATE_API_URL=... 编译时注入
+  // 备案前: build_web_release_ip.ps1 默认 http://122.51.10.98/api (同站)
+  // 备案后: build_web_release.ps1 传入 http://translate-api.air-inc.top
+  static String get _defaultUrl => const String.fromEnvironment(
+    'AIRTRANSLATE_API_URL',
+    defaultValue: 'http://122.51.10.98/api',
+  );
 
   String _baseUrl = _defaultUrl;
   String? _deviceId;

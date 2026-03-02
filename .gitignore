@@ -44,3 +44,4 @@ node_modules/
 hs_err_pid*
 replay_pid*
 软著材料
+.gradle-cache/

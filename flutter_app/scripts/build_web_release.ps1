@@ -1,4 +1,8 @@
-flutter build web --release
+# 备案后使用：API 通过 translate-api.air-inc.top 独立站点
+$API_URL = "http://translate-api.air-inc.top"
+
+flutter build web --release `
+  --dart-define=AIRTRANSLATE_API_URL="$API_URL"
 
 if ($LASTEXITCODE -ne 0) {
   Write-Host "Web build failed!" -ForegroundColor Red
