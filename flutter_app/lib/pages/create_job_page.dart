@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -31,9 +32,10 @@ class _CreateJobPageState extends State<CreateJobPage> {
   bool _useGlossary = false;
   String? _localCoverImage;
 
-  // 术语表
+  // 术语表（支持文件上传或输入框）
   Uint8List? _glossaryBytes;
   String? _glossaryFileName;
+  final _glossaryController = TextEditingController();
 
   // 状态
   bool _submitting = false;
@@ -49,6 +51,12 @@ class _CreateJobPageState extends State<CreateJobPage> {
   void initState() {
     super.initState();
     _loadBillingConfig();
+  }
+
+  @override
+  void dispose() {
+    _glossaryController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadBillingConfig() async {
@@ -152,7 +160,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
   Future<void> _pickGlossary() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['json'],
+      allowedExtensions: ['json', 'txt'],
       withData: true,
     );
     if (result != null && result.files.isNotEmpty) {
@@ -162,6 +170,62 @@ class _CreateJobPageState extends State<CreateJobPage> {
       });
     }
   }
+
+  /// 解析术语表字符串为 Map，支持 JSON 或每行 key=value / key: value
+  static Map<String, String> _parseGlossaryFromString(String s) {
+    final trimmed = s.trim();
+    if (trimmed.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(trimmed);
+      if (decoded is Map) {
+        return Map<String, String>.fromEntries(
+          decoded.entries.where((e) => e.key != null && e.value != null).map(
+            (e) => MapEntry(e.key.toString().trim(), e.value.toString().trim()),
+          ),
+        );
+      }
+    } catch (_) {}
+    final out = <String, String>{};
+    for (final line in trimmed.split('\n')) {
+      final l = line.trim();
+      if (l.isEmpty || l.startsWith('#')) continue;
+      String? k, v;
+      if (l.contains('=')) {
+        final idx = l.indexOf('=');
+        k = l.substring(0, idx).trim();
+        v = l.substring(idx + 1).trim();
+      } else if (l.contains(':') && !l.startsWith('{')) {
+        final idx = l.indexOf(':');
+        k = l.substring(0, idx).trim();
+        v = l.substring(idx + 1).trim();
+      } else if (l.contains('\t')) {
+        final parts = l.split('\t');
+        if (parts.length >= 2) {
+          k = parts[0].trim();
+          v = parts.sublist(1).join('\t').trim();
+        }
+      }
+      if (k != null && v != null && k.isNotEmpty && v.isNotEmpty) {
+        out[k] = v;
+      }
+    }
+    return out;
+  }
+
+  Uint8List? _buildGlossaryBytes() {
+    final fromFile = _glossaryBytes != null
+        ? _parseGlossaryFromString(utf8.decode(_glossaryBytes!))
+        : <String, String>{};
+    final fromText = _glossaryController.text.trim().isNotEmpty
+        ? _parseGlossaryFromString(_glossaryController.text)
+        : <String, String>{};
+    final merged = {...fromFile, ...fromText};
+    if (merged.isEmpty) return null;
+    return Uint8List.fromList(utf8.encode(jsonEncode(merged)));
+  }
+
+  bool get _hasGlossaryContent =>
+      _glossaryBytes != null || _glossaryController.text.trim().isNotEmpty;
 
   Future<void> _submit() async {
     if (_fileBytes == null || _fileName == null) {
@@ -183,7 +247,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
         targetLang: _targetLang,
         sourceFileName: _fileName!,
         charCount: _charCount,
-        useGlossary: _isAI && _useGlossary && _glossaryBytes != null,
+        useGlossary: _isAI && _useGlossary && _hasGlossaryContent,
       );
 
       final uploadInfo = result['upload'] as Map<String, dynamic>;
@@ -193,9 +257,10 @@ class _CreateJobPageState extends State<CreateJobPage> {
       await _api.uploadFile(uploadUrl, _fileBytes!, 'application/epub+zip');
 
       // 3. 上传术语表 (如有)
-      if (_isAI && _useGlossary && _glossaryBytes != null && result['glossaryUpload'] != null) {
+      final glossaryBytes = _buildGlossaryBytes();
+      if (_isAI && _useGlossary && glossaryBytes != null && result['glossaryUpload'] != null) {
         final glossaryInfo = result['glossaryUpload'] as Map<String, dynamic>;
-        await _api.uploadFile(glossaryInfo['url'] as String, _glossaryBytes!, 'application/json');
+        await _api.uploadFile(glossaryInfo['url'] as String, glossaryBytes, 'application/json');
       }
 
       // 4. 标记上传完成（进入待启动）
@@ -336,9 +401,7 @@ class _CreateJobPageState extends State<CreateJobPage> {
                 contentPadding: EdgeInsets.zero,
                 title: const Text('使用术语表', style: TextStyle(fontSize: 15)),
                 subtitle: Text(
-                  _engineType == 'AI_ONLINE'
-                      ? '上传术语表确保专业术语翻译准确 (最多10条)'
-                      : '上传 JSON 格式术语表 {"原文": "译文", ...}',
+                  '上传或输入术语表，确保专业术语翻译准确。支持每行一个术语（key=value 或 key: value）或 JSON 格式。在线翻译无条数限制；个人部署模式下仅使用前 10 条。',
                   style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                 ),
                 value: _useGlossary,
@@ -347,11 +410,28 @@ class _CreateJobPageState extends State<CreateJobPage> {
               if (_useGlossary)
                 Padding(
                   padding: const EdgeInsets.only(left: 16, bottom: 8),
-                  child: OutlinedButton.icon(
-                    onPressed: _pickGlossary,
-                    icon: const Icon(Icons.attach_file, size: 18),
-                    label: Text(_glossaryFileName ?? '选择术语表 JSON'),
-                    style: OutlinedButton.styleFrom(minimumSize: const Size(0, 40)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: _pickGlossary,
+                        icon: const Icon(Icons.attach_file, size: 18),
+                        label: Text(_glossaryFileName ?? '上传术语表文件 (.json / .txt)'),
+                        style: OutlinedButton.styleFrom(minimumSize: const Size(0, 40)),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: _glossaryController,
+                        decoration: const InputDecoration(
+                          hintText: '或在此输入术语，每行一个，格式：原文=译文 或 原文: 译文',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                        ),
+                        maxLines: 4,
+                        onChanged: (_) => setState(() {}),
+                      ),
+                    ],
                   ),
                 ),
               const SizedBox(height: 12),

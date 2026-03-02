@@ -1417,7 +1417,8 @@ async function processTranslationJob(jobId) {
       try {
         const glossaryPath = path.join(tmpDir, 'glossary.json');
         await downloadFile(glossaryUrl, glossaryPath);
-        glossary = JSON.parse(fs.readFileSync(glossaryPath, 'utf-8'));
+        const raw = fs.readFileSync(glossaryPath, 'utf-8');
+        glossary = parseGlossaryContent(raw);
         console.log(`[${engineLabel}][${tag}] Loaded glossary with ${Object.keys(glossary).length} entries`);
         if (engineType === 'AI_ONLINE' && glossary && Object.keys(glossary).length > 0) {
           glossaryId = await glossaryToHunyuanGlossary(glossary, spec.sourceLang || 'auto', spec.targetLang || 'zh', tag);
@@ -1639,6 +1640,50 @@ async function createGlossaryEntries(glossaryId, entries) {
 /** 删除术语库 */
 async function deleteGlossary(glossaryId) {
   return callHunyuanApi('DeleteGlossary', { GlossaryId: glossaryId });
+}
+
+/** 解析术语表内容，支持 JSON 或配置文件格式（每行 key=value 或 key: value） */
+function parseGlossaryContent(raw) {
+  if (!raw || typeof raw !== 'string') return {};
+  const s = raw.trim();
+  if (!s) return {};
+  try {
+    const obj = JSON.parse(s);
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      const out = {};
+      for (const [k, v] of Object.entries(obj)) {
+        if (k && v != null) {
+          const ks = String(k).trim();
+          const vs = String(v).trim();
+          if (ks && vs) out[ks] = vs;
+        }
+      }
+      return out;
+    }
+  } catch (_) {}
+  const out = {};
+  for (const line of s.split(/\r?\n/)) {
+    const l = line.trim();
+    if (!l || l.startsWith('#')) continue;
+    let k, v;
+    if (l.includes('=')) {
+      const idx = l.indexOf('=');
+      k = l.substring(0, idx).trim();
+      v = l.substring(idx + 1).trim();
+    } else if (l.includes(':') && !l.startsWith('{')) {
+      const idx = l.indexOf(':');
+      k = l.substring(0, idx).trim();
+      v = l.substring(idx + 1).trim();
+    } else if (l.includes('\t')) {
+      const parts = l.split('\t');
+      if (parts.length >= 2) {
+        k = parts[0].trim();
+        v = parts.slice(1).join('\t').trim();
+      }
+    }
+    if (k && v) out[k] = v;
+  }
+  return out;
 }
 
 /** 从 glossary 对象创建术语库，返回 glossaryId；无条目时返回 null */
