@@ -336,11 +336,15 @@ async function sendSmsCode(phone) {
     return { error: 'SmsConfigError', message: '短信服务未配置' };
   }
 
+  // 模板参数：1=仅验证码{1}，2=验证码{1}+有效期分钟数{2}；需与腾讯云正文模板占位符一致
+  const paramCount = parseInt((process.env.SMS_TEMPLATE_PARAM_COUNT || '1').trim(), 10) || 1;
+  const templateParamSet = paramCount >= 2 ? [code, '5'] : [code];
+
   const smsPayload = {
     SmsSdkAppId: smsAppId,
     SignName: smsSign,
     TemplateId: smsTemplateId,
-    TemplateParamSet: [code, '5'],
+    TemplateParamSet: templateParamSet,
     PhoneNumberSet: [`+86${safe}`],
   };
   const smsPayloadJson = JSON.stringify(smsPayload);
