@@ -332,8 +332,13 @@ class ApiService {
   // HTTP helpers
   // -----------------------------------------------------------------------
 
+  static const String _apiKey =
+      String.fromEnvironment('AIRTRANSLATE_API_KEY', defaultValue: '');
+
   Map<String, String> _buildHeaders() {
     final headers = <String, String>{'Content-Type': 'application/json'};
+    final key = _apiKey.trim();
+    if (key.isNotEmpty) headers['X-Api-Key'] = key;
     if (AuthService.isLoggedIn && AuthService.token.isNotEmpty) {
       headers['X-Auth-Token'] = AuthService.token;
     }

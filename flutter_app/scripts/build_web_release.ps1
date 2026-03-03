@@ -1,7 +1,8 @@
 . "$PSScriptRoot\build_config.ps1"
 
 flutter build web --release `
-  --dart-define=AIRTRANSLATE_API_URL="$API_URL"
+  --dart-define=AIRTRANSLATE_API_URL="$API_URL" `
+  --dart-define=AIRTRANSLATE_API_KEY="$API_KEY"
 
 if ($LASTEXITCODE -ne 0) {
   Write-Host "Web build failed!" -ForegroundColor Red

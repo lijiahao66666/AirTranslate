@@ -3,7 +3,8 @@
 $env:GRADLE_USER_HOME = "$pwd\android\.gradle-cache"
 
 flutter build appbundle --release `
-  --dart-define=AIRTRANSLATE_API_URL=$API_URL
+  --dart-define=AIRTRANSLATE_API_URL=$API_URL `
+  --dart-define=AIRTRANSLATE_API_KEY=$API_KEY
 
 if ($LASTEXITCODE -ne 0) {
   Write-Host "AAB build failed!" -ForegroundColor Red

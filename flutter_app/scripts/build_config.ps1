@@ -8,3 +8,6 @@ if ($UseIpMode) {
 } else {
   $API_URL = "http://translate-api.air-inc.top"
 }
+
+# API Key（与服务端 .env 的 API_KEY 一致，用于鉴权）
+$API_KEY = "af9a7d9ac145f539c84616012f9398b121cee1ad65005f3fc055f056aa4fd3fc"

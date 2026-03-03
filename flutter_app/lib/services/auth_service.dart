@@ -199,10 +199,15 @@ class AuthService {
     await prefs.setBool(_kIsLoggedIn, false);
   }
 
+  static const String _apiKey =
+      String.fromEnvironment('AIRTRANSLATE_API_KEY', defaultValue: '');
+
   static Map<String, String> _buildHeaders({bool withAuth = false}) {
     final headers = <String, String>{
       'Content-Type': 'application/json',
     };
+    final key = _apiKey.trim();
+    if (key.isNotEmpty) headers['X-Api-Key'] = key;
     if (withAuth && _token.isNotEmpty) headers['X-Auth-Token'] = _token;
     return headers;
   }
