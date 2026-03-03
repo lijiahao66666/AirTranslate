@@ -22,6 +22,12 @@ AirTranslate/
 ├── config.json         # 运行时配置 (积分/版本/AI开关)
 ├── data/               # 本地数据 (积分/任务/进度)
 ├── flutter_app/        # Flutter 客户端 App
+│   └── scripts/
+│       ├── build_config.ps1    # 统一构建配置 (备案前/后切换)
+│       ├── build_web_release.ps1
+│       ├── build_android_aab_release.ps1
+│       ├── build_android_apk_arm64_release.ps1
+│       └── build_ios_ipa_release.sh
 ├── frp/                # frp 内网穿透 (frpc.exe + frpc.toml)
 └── scripts/
     ├── start_local.ps1  # 一键启动本地 AI (frpc + vLLM)
@@ -231,6 +237,24 @@ remotePort = 7001
 | `POST /auth/sms/verify` | 验证码登录 |
 | `POST /auth/profile` | 用户信息 |
 | `POST /auth/logout` | 退出登录 |
+
+## Flutter 客户端打包
+
+在 `flutter_app/` 目录下执行。Web / Android / iOS 共用 `scripts/build_config.ps1`：
+- **备案后**：`$UseIpMode = $false`（默认），API 使用 `translate-api.air-inc.top`
+- **备案前**：`$UseIpMode = $true`，API 使用 `122.51.10.98:8082/api`
+- iOS 需同步修改 `build_ios_ipa_release.sh` 中的 `USE_IP_MODE`
+
+```powershell
+cd flutter_app
+.\scripts\build_web_release.ps1              # Web
+.\scripts\build_android_aab_release.ps1      # Android AAB
+.\scripts\build_android_apk_arm64_release.ps1 # Android APK
+```
+
+```bash
+./scripts/build_ios_ipa_release.sh            # iOS
+```
 
 ## 技术栈
 
