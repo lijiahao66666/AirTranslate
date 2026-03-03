@@ -32,6 +32,7 @@ class _WalletSheetState extends State<WalletSheet> {
   bool _checkedInToday = false;
   bool _checkinBusy = false;
   int _checkinPoints = 5000;
+  int _initialGrantPoints = 500000;
   int _currentBalance = 0;
 
   @override
@@ -48,6 +49,7 @@ class _WalletSheetState extends State<WalletSheet> {
       if (mounted) {
         setState(() {
           _checkinPoints = (resp['checkin_points'] as num?)?.toInt() ?? 5000;
+          _initialGrantPoints = (resp['initial_grant_points'] as num?)?.toInt() ?? 500000;
         });
       }
     } catch (_) {}
@@ -218,7 +220,10 @@ class _WalletSheetState extends State<WalletSheet> {
                         }
                       } else {
                         if (!mounted) return;
-                        final success = await LoginPage.show(context);
+                        final success = await LoginPage.show(
+                          context,
+                          initialGrantPoints: _initialGrantPoints,
+                        );
                         if (success) {
                           widget.onBalanceChanged();
                           if (mounted) {

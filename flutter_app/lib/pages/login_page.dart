@@ -8,17 +8,22 @@ import '../services/auth_service.dart';
 
 /// 手机号验证码登录页面
 class LoginPage extends StatefulWidget {
-  const LoginPage({super.key});
+  const LoginPage({super.key, this.initialGrantPoints = 500000});
+
+  final int initialGrantPoints;
 
   /// 显示登录页面（底部弹出），返回是否登录成功
-  static Future<bool> show(BuildContext context) async {
+  /// [initialGrantPoints] 登录赠送积分，取自 config.json，可由调用方传入
+  static Future<bool> show(BuildContext context, {int? initialGrantPoints}) async {
     final result = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (_) => const LoginPage(),
+      builder: (_) => LoginPage(
+        initialGrantPoints: initialGrantPoints ?? 500000,
+      ),
     );
     return result == true;
   }
@@ -216,7 +221,7 @@ class _LoginPageState extends State<LoginPage> {
           ),
           const SizedBox(height: 4),
           Text(
-            '登录后积分跨设备同步',
+            '登录赠送${NumberFormat('#,###').format(widget.initialGrantPoints)}积分，积分跨设备同步',
             style: TextStyle(
               fontSize: 12,
               color: isDark ? Colors.white54 : Colors.black45,
