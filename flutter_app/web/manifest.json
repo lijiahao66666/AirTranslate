@@ -1,6 +1,6 @@
 {
-    "name": "air_translate",
-    "short_name": "air_translate",
+    "name": "灵译",
+    "short_name": "灵译",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
