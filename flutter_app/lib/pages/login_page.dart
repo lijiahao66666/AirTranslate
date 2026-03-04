@@ -100,8 +100,9 @@ class _LoginPageState extends State<LoginPage> {
     setState(() => _logging = false);
 
     if (result.success) {
-      if (result.isNewUser && result.balance != null && result.balance! > 0 && mounted) {
-        await _showGrantAnimation(context, result.balance!);
+      if (result.initialGrantedThisTime && mounted) {
+        final points = result.initialGrantPoints ?? widget.initialGrantPoints;
+        await _showGrantAnimation(context, points);
       }
       if (mounted) Navigator.of(context).pop(true);
     } else {
@@ -221,7 +222,7 @@ class _LoginPageState extends State<LoginPage> {
           ),
           const SizedBox(height: 4),
           Text(
-            '登录赠送${NumberFormat('#,###').format(widget.initialGrantPoints)}积分，积分跨设备同步',
+            '登录赠送积分，积分跨设备同步',
             style: TextStyle(
               fontSize: 12,
               color: isDark ? Colors.white54 : Colors.black45,

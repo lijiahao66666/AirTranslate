@@ -633,21 +633,21 @@ function writePointsBalance(deviceId, balance) {
 
 function ensureInitialGrant(deviceId, isUserId) {
   const data = _readPointsData(deviceId);
+  const grantAmount = Number(loadConfig().initial_grant_points) || 500000;
   if (!data.initialGranted) {
     if (isUserId) {
-      // Logged-in account — grant initial points
-      const cfg = loadConfig();
-      data.balance = (Number(data.balance) || 0) + cfg.initial_grant_points;
+      data.balance = (Number(data.balance) || 0) + grantAmount;
       data.initialGranted = true;
       _writePointsData(deviceId, data);
-      console.log(`[points] initial grant ${cfg.initial_grant_points} to userId=${deviceId}`);
+      console.log(`[points] initial grant ${grantAmount} to userId=${deviceId}`);
+      return { balance: Number(data.balance), initialGrantedThisTime: true };
     } else {
-      // Anonymous device — just ensure record exists, no grant
       _writePointsData(deviceId, data);
       console.log(`[points] new anonymous device ${deviceId}, balance=${data.balance}`);
+      return { balance: Number(data.balance) || 0, initialGrantedThisTime: false };
     }
   }
-  return Number(data.balance) || 0;
+  return { balance: Number(data.balance) || 0, initialGrantedThisTime: false };
 }
 
 function doCheckin(deviceId) {
@@ -954,7 +954,7 @@ function handleBillingInit(req, res, body) {
   const userId = getUserIdFromReq(req);
   const id = userId || getEffectiveId(req, body);
   if (!id) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
-  const balance = ensureInitialGrant(id, !!userId);
+  const { balance } = ensureInitialGrant(id, !!userId);
   return sendJson(res, 200, { deviceId: id, balance });
 }
 
@@ -2073,8 +2073,8 @@ const server = http.createServer(async (req, res) => {
       }
       const isNew = !fs.existsSync(_userFile(phone.replace(/[^0-9]/g, '')));
       const user = findOrCreateUser(phone);
-      // Ensure initial grant for user account (idempotent)
-      ensureInitialGrant(user.userId, true);
+      const cfg = loadConfig();
+      const grantResult = ensureInitialGrant(user.userId, true);
       // Merge device anonymous points INTO userId (additive), then reset device
       const deviceId = String(req.headers['x-device-id'] || body.deviceId || '').trim();
       if (deviceId && deviceId !== user.userId) {
@@ -2096,6 +2096,8 @@ const server = http.createServer(async (req, res) => {
         token: user.token, userId: user.userId,
         phone: user.phone.substring(0, 3) + '****' + user.phone.substring(7),
         balance, isNewUser: isNew,
+        initialGrantedThisTime: grantResult.initialGrantedThisTime,
+        initialGrantPoints: grantResult.initialGrantedThisTime ? (Number(cfg.initial_grant_points) || 500000) : undefined,
       });
     }
 

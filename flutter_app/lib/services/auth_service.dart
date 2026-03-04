@@ -123,11 +123,13 @@ class AuthService {
         await prefs.setBool(_kIsLoggedIn, true);
 
         onAuthStateChanged?.call();
-        debugPrint('[Auth] login success: userId=$_userId phone=$_phone isNew=${json['isNewUser']}');
+        debugPrint('[Auth] login success: userId=$_userId phone=$_phone isNew=${json['isNewUser']} initialGranted=${json['initialGrantedThisTime']}');
         return AuthResult(
           success: true,
           balance: (json['balance'] as num?)?.toInt(),
           isNewUser: json['isNewUser'] == true,
+          initialGrantedThisTime: json['initialGrantedThisTime'] == true,
+          initialGrantPoints: (json['initialGrantPoints'] as num?)?.toInt(),
         );
       }
 
@@ -218,11 +220,15 @@ class AuthResult {
   final String? error;
   final int? balance;
   final bool isNewUser;
+  final bool initialGrantedThisTime;
+  final int? initialGrantPoints;
 
   AuthResult({
     required this.success,
     this.error,
     this.balance,
     this.isNewUser = false,
+    this.initialGrantedThisTime = false,
+    this.initialGrantPoints,
   });
 }

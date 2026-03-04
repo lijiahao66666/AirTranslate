@@ -178,7 +178,7 @@ class _WalletSheetState extends State<WalletSheet> {
                       Text(
                         AuthService.isLoggedIn
                             ? '积分跨设备同步'
-                            : '登录可获赠${NumberFormat('#,###').format(_initialGrantPoints)}积分，并跨设备同步',
+                            : '登录赠送积分，并跨设备同步',
                         style: TextStyle(
                           color: cs.onSurface.withValues(alpha: 0.55),
                           fontSize: 12,
