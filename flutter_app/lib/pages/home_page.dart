@@ -315,8 +315,21 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
 
-            // 底部留白
-            const SliverToBoxAdapter(child: SizedBox(height: 80)),
+            // 底部留白 + ICP 备案号
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 24, 20, 80),
+                child: Center(
+                  child: Text(
+                    '浙ICP备2026011869号-1',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: cs.onSurface.withOpacity(0.35),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ],
         ),
       ),
