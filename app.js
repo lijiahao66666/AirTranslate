@@ -1516,7 +1516,12 @@ async function processTranslationJob(jobId) {
     progress.updatedAt = new Date().toISOString();
     writeProgress(jobId, progress);
 
-    const uploadUrl = outputMode.toUpperCase() === 'BILINGUAL' ? cosUrls.bilingualUploadUrl : cosUrls.translatedUploadUrl;
+    // 在上传前重新生成 presign URL，避免翻译耗时过长导致 URL 过期（403 Request has expired）
+    const { presignSeconds } = getCosConfig();
+    const uploadCosKey = outputMode.toUpperCase() === 'BILINGUAL'
+      ? buildCosKey(`${jobId}/bilingual.epub`)
+      : buildCosKey(`${jobId}/translated.epub`);
+    const uploadUrl = cosPresignUrl({ method: 'PUT', key: uploadCosKey, expiresSeconds: presignSeconds, headers: { 'content-type': 'application/epub+zip' } });
     await uploadFile(uploadUrl, resultEpub);
 
     progress.state = 'DONE'; progress.percent = 100;
