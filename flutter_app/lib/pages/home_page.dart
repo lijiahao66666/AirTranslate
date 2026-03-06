@@ -1,8 +1,13 @@
 import 'dart:async';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:http/http.dart' as http;
 import '../models/job.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
@@ -112,7 +117,31 @@ class _HomePageState extends State<HomePage> {
   Future<void> _download(Job job) async {
     try {
       final url = await _api.getDownloadUrl(job.jobId, output: job.output);
-      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+      if (kIsWeb) {
+        await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+        return;
+      }
+      if (Platform.isAndroid || Platform.isIOS) {
+        _showInfo('正在下载…');
+        final resp = await http.get(Uri.parse(url));
+        if (resp.statusCode != 200) {
+          _showError('下载失败: ${resp.statusCode}');
+          return;
+        }
+        final dir = await getTemporaryDirectory();
+        final baseName = job.sourceFileName.replaceAll('.epub', '');
+        final suffix = (job.output ?? '').toUpperCase() == 'BILINGUAL' ? '_双语' : '_译文';
+        final fileName = '$baseName$suffix.epub';
+        final file = File('${dir.path}/$fileName');
+        await file.writeAsBytes(resp.bodyBytes);
+        if (!mounted) return;
+        final result = await OpenFilex.open(file.path, type: 'application/epub+zip');
+        if (result.type != ResultType.done && mounted) {
+          _showError(result.message);
+        }
+      } else {
+        await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+      }
     } catch (e) {
       _showError('获取下载链接失败: $e');
     }
@@ -188,6 +217,17 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  void _showInfo(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+      ),
     );
   }
 

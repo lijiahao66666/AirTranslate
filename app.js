@@ -1962,6 +1962,20 @@ function collectTextNodes($, bodyNode, segments, nodeRefs) {
   walk(bodyNode);
 }
 
+/** 解码 HTML 实体（如 &#45556;、&#x4E2D;），避免 LLM 输出实体导致 EPUB 乱码 */
+function decodeHtmlEntities(s) {
+  if (!s || typeof s !== 'string') return s;
+  return s
+    .replace(/&#(\d{1,7});?/g, (_, d) => {
+      const n = parseInt(d, 10);
+      return (n >= 0 && n <= 0x10FFFF) ? String.fromCodePoint(n) : _;
+    })
+    .replace(/&#x([0-9a-fA-F]{1,6});?/g, (_, h) => {
+      const n = parseInt(h, 16);
+      return (n <= 0x10FFFF) ? String.fromCodePoint(n) : _;
+    });
+}
+
 function extractAndPrepare(htmlPath) {
   const raw = fs.readFileSync(htmlPath, 'utf-8');
   const $ = loadHtml(raw);
@@ -2001,6 +2015,7 @@ function extractAndPrepare(htmlPath) {
         let translated = translatedTexts[i];
         if (translated != null) translated = String(translated).trim();
         if (!translated || translated === segments[i]) continue;
+        translated = decodeHtmlEntities(translated);
         const node = nodeRefs[i];
         const escaped = translated.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         if (isBilingual) {
