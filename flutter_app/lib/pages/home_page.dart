@@ -315,26 +315,29 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
 
-            // 底部留白 + ICP 备案号
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 24, 20, 80),
-                child: Center(
-                  child: Text(
-                    '浙ICP备2026011869号-1',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: cs.onSurface.withOpacity(0.35),
-                    ),
-                  ),
-                ),
-              ),
-            ),
+            // 底部留白（给 FAB 和备案号留空间）
+            const SliverToBoxAdapter(child: SizedBox(height: 80)),
           ],
         ),
       ),
 
-      // FAB
+      // ICP 固定底部（用 bottomNavigationBar 占位，FAB 自动浮于其上方）
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Center(
+            child: Text(
+              '浙ICP备2026011869号-1',
+              style: TextStyle(
+                fontSize: 11,
+                color: cs.onSurface.withOpacity(0.35),
+              ),
+            ),
+          ),
+        ),
+      ),
+
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () async {
           final result = await Navigator.push(
