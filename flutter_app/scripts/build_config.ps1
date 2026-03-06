@@ -1,12 +1,13 @@
 # AirTranslate 构建配置 - Web / Android / iOS 共用
 # 切换备案前/后：修改 $UseIpMode，所有打包脚本会同步使用
-$UseIpMode = $true   # 备案前改为 $true
+$UseIpMode = $false   # 备案前改为 $true
 
 if ($UseIpMode) {
   # translate 站点监听 8082，需带端口
   $API_URL = "http://122.51.10.98:8082/api"
 } else {
-  $API_URL = "http://translate-api.air-inc.top"
+  # 与访问域名同源，避免 CORS
+  $API_URL = "http://translate.air-inc.top/api"
 }
 
 # API Key（与服务端 .env 的 API_KEY 一致，用于鉴权）
