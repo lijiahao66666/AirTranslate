@@ -14,7 +14,7 @@ class ApiService {
   static const _coversKey = 'jobs_local_covers_v1';
   // 通过 --dart-define=AIRTRANSLATE_API_URL=... 编译时注入
   // 备案前: build_web_release_ip.ps1 默认 http://122.51.10.98/api (同站)
-  // 备案后: build_web_release.ps1 传入 http://translate-api.air-inc.top
+  // 备案后: build_web_release.ps1 传入 http://translate.air-inc.top/api
   static String get _defaultUrl => const String.fromEnvironment(
     'AIRTRANSLATE_API_URL',
     defaultValue: 'http://122.51.10.98/api',

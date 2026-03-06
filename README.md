@@ -241,7 +241,7 @@ remotePort = 7001
 ## Flutter 客户端打包
 
 在 `flutter_app/` 目录下执行。Web / Android / iOS 共用 `scripts/build_config.ps1`：
-- **备案后**：`$UseIpMode = $false`（默认），API 使用 `translate-api.air-inc.top`
+- **备案后**：`$UseIpMode = $false`（默认），API 使用 `translate.air-inc.top/api`
 - **备案前**：`$UseIpMode = $true`，API 使用 `122.51.10.98:8082/api`
 - iOS 需同步修改 `build_ios_ipa_release.sh` 中的 `USE_IP_MODE`
 
