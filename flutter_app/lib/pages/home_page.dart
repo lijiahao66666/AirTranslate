@@ -240,9 +240,10 @@ class _HomePageState extends State<HomePage> {
     final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
-      body: RefreshIndicator(
-        onRefresh: _loadData,
-        child: CustomScrollView(
+      body: SizedBox.expand(
+        child: RefreshIndicator(
+          onRefresh: _loadData,
+          child: CustomScrollView(
           slivers: [
             // 渐变顶栏
             SliverAppBar(
@@ -359,6 +360,7 @@ class _HomePageState extends State<HomePage> {
             const SliverToBoxAdapter(child: SizedBox(height: 80)),
           ],
         ),
+        ),
       ),
 
       // ICP 固定底部（用 bottomNavigationBar 占位，FAB 自动浮于其上方）
@@ -366,9 +368,11 @@ class _HomePageState extends State<HomePage> {
         top: false,
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Center(
+          child: SizedBox(
+            width: double.infinity,
             child: Text(
               '浙ICP备2026011869号-1',
+              textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 11,
                 color: cs.onSurface.withOpacity(0.35),

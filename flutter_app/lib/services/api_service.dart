@@ -9,7 +9,7 @@ import '../models/job.dart';
 import 'auth_service.dart';
 
 class ApiService {
-  static const _prefKey = 'server_base_url';
+  static const _prefKey = 'server_base_url_v2';  // v2: 忽略旧缓存，强制使用编译时 API 地址
   static const _jobsCachePrefix = 'jobs_cache_v1_';
   static const _coversKey = 'jobs_local_covers_v1';
   // 通过 --dart-define=AIRTRANSLATE_API_URL=... 编译时注入
@@ -30,7 +30,8 @@ class ApiService {
 
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
-    _baseUrl = prefs.getString(_prefKey) ?? _defaultUrl;
+    // Web 端强制使用编译时 API 地址，避免 localStorage 旧缓存导致只显示备案号
+    _baseUrl = kIsWeb ? _defaultUrl : (prefs.getString(_prefKey) ?? _defaultUrl);
     _deviceId = await _getOrCreateDeviceId(prefs);
   }
 

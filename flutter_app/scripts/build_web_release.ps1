@@ -1,6 +1,8 @@
 . "$PSScriptRoot\build_config.ps1"
 
 flutter build web --release `
+  --no-web-resources-cdn `
+  --pwa-strategy=none `
   --dart-define=AIRTRANSLATE_API_URL="$API_URL" `
   --dart-define=AIRTRANSLATE_API_KEY="$API_KEY"
 
