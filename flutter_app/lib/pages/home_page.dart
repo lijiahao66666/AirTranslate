@@ -267,7 +267,8 @@ class _HomePageState extends State<HomePage> {
 
   void _showProgress(String msg) {
     if (!mounted) return;
-    final textColor = Theme.of(context).colorScheme.onSurface;
+    final cs = Theme.of(context).colorScheme;
+    final textColor = cs.onInverseSurface;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
@@ -289,7 +290,7 @@ class _HomePageState extends State<HomePage> {
         ),
         behavior: SnackBarBehavior.floating,
         duration: const Duration(days: 1),
-        backgroundColor: Theme.of(context).colorScheme.primary,
+        backgroundColor: cs.inverseSurface,
       ),
     );
   }
@@ -312,6 +313,9 @@ class _HomePageState extends State<HomePage> {
         child: RefreshIndicator(
           onRefresh: _loadData,
           child: CustomScrollView(
+            physics: (_loading || _jobs.isEmpty)
+                ? const NeverScrollableScrollPhysics()
+                : const AlwaysScrollableScrollPhysics(),
             slivers: [
               // 渐变顶栏
               SliverAppBar(
@@ -443,8 +447,8 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
 
-              // 底部留白（给 FAB 和备案号留空间）
-              const SliverToBoxAdapter(child: SizedBox(height: 80)),
+              if (_jobs.isNotEmpty)
+                const SliverToBoxAdapter(child: SizedBox(height: 80)),
             ],
           ),
         ),

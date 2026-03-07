@@ -31,7 +31,8 @@ class AuthService {
   static String get phone => _phone;
 
   /// 获取有效身份标识: 登录后用 userId, 否则用 deviceId
-  static String get effectiveId => _loggedIn && _userId.isNotEmpty ? _userId : ApiService().deviceId;
+  static String get effectiveId =>
+      _loggedIn && _userId.isNotEmpty ? _userId : ApiService().deviceId;
 
   /// 启动时从本地缓存恢复登录态
   static Future<void> init() async {
@@ -39,7 +40,8 @@ class AuthService {
     _token = (prefs.getString(_kAuthToken) ?? '').trim();
     _userId = (prefs.getString(_kUserId) ?? '').trim();
     _phone = (prefs.getString(_kPhone) ?? '').trim();
-    _loggedIn = prefs.getBool(_kIsLoggedIn) ?? false;
+    final persistedLoggedIn = prefs.getBool(_kIsLoggedIn) ?? false;
+    _loggedIn = _token.isNotEmpty && (persistedLoggedIn || _userId.isNotEmpty);
 
     // 验证 token 是否仍有效
     if (_loggedIn && _token.isNotEmpty) {
@@ -53,7 +55,8 @@ class AuthService {
       }
     }
 
-    debugPrint('[Auth] init: loggedIn=$_loggedIn userId=$_userId phone=$_phone');
+    debugPrint(
+        '[Auth] init: loggedIn=$_loggedIn userId=$_userId phone=$_phone');
   }
 
   /// 发送短信验证码
@@ -123,7 +126,8 @@ class AuthService {
         await prefs.setBool(_kIsLoggedIn, true);
 
         onAuthStateChanged?.call();
-        debugPrint('[Auth] login success: userId=$_userId phone=$_phone isNew=${json['isNewUser']} initialGranted=${json['initialGrantedThisTime']}');
+        debugPrint(
+            '[Auth] login success: userId=$_userId phone=$_phone isNew=${json['isNewUser']} initialGranted=${json['initialGrantedThisTime']}');
         return AuthResult(
           success: true,
           balance: (json['balance'] as num?)?.toInt(),
@@ -162,11 +166,11 @@ class AuthService {
       if (resp.statusCode == 401) {
         return null;
       }
+      throw Exception('Unexpected profile status: ${resp.statusCode}');
     } catch (e) {
       debugPrint('[Auth] getProfile error: $e');
       rethrow;
     }
-    return null;
   }
 
   /// 退出登录
