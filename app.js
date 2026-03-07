@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 // =========================================================================
 // AirTranslate Server (v6 - all-in-one, no Worker)
