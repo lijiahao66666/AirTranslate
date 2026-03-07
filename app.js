@@ -2145,6 +2145,70 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { success: true });
     }
 
+    // --- Admin Points (for points-gift-tool) ---
+    if (req.method === 'POST' && (pathname === '/admin/points/lookup' || pathname === '/points/admin/lookup')) {
+      if (!verifyApiKey(req)) return sendJson(res, 401, { error: 'Unauthorized' });
+      const phone = String(body.phone || '').replace(/[^0-9]/g, '');
+      if (phone.length !== 11) {
+        return sendJson(res, 400, { error: 'InvalidPhone', message: '请输入正确的手机号' });
+      }
+      const userFile = _userFile(phone);
+      if (!fs.existsSync(userFile)) {
+        return sendJson(res, 404, { error: 'UserNotFound', message: '该手机号在此应用未找到登录账号' });
+      }
+      try {
+        const user = JSON.parse(fs.readFileSync(userFile, 'utf-8'));
+        const userId = String(user.userId || '').trim();
+        if (!userId) return sendJson(res, 500, { error: 'UserDataInvalid', message: '用户数据异常：缺少 userId' });
+        const balance = readPointsBalance(userId);
+        return sendJson(res, 200, {
+          phone,
+          userId,
+          balance,
+          createdAt: user.createdAt,
+          lastLoginAt: user.lastLoginAt,
+          loginCount: Number(user.loginCount || 0),
+        });
+      } catch (_) {
+        return sendJson(res, 500, { error: 'UserDataInvalid', message: '用户数据读取失败' });
+      }
+    }
+
+    if (req.method === 'POST' && (pathname === '/admin/points/grant' || pathname === '/points/admin/grant')) {
+      if (!verifyApiKey(req)) return sendJson(res, 401, { error: 'Unauthorized' });
+      const phone = String(body.phone || '').replace(/[^0-9]/g, '');
+      if (phone.length !== 11) {
+        return sendJson(res, 400, { error: 'InvalidPhone', message: '请输入正确的手机号' });
+      }
+      const points = Number(body.points);
+      if (!Number.isInteger(points) || points <= 0) {
+        return sendJson(res, 400, { error: 'InvalidPoints', message: 'points 必须是正整数' });
+      }
+      if (points > 1000000000) {
+        return sendJson(res, 400, { error: 'InvalidPoints', message: '单次赠送积分不能超过 10 亿' });
+      }
+      const userFile = _userFile(phone);
+      if (!fs.existsSync(userFile)) {
+        return sendJson(res, 404, { error: 'UserNotFound', message: '该手机号在此应用未找到登录账号' });
+      }
+      try {
+        const user = JSON.parse(fs.readFileSync(userFile, 'utf-8'));
+        const userId = String(user.userId || '').trim();
+        if (!userId) return sendJson(res, 500, { error: 'UserDataInvalid', message: '用户数据异常：缺少 userId' });
+        const beforeBalance = readPointsBalance(userId);
+        const afterBalance = writePointsBalance(userId, beforeBalance + points);
+        console.log(`[AdminPoints] grant +${points} to ${userId}, before=${beforeBalance}, after=${afterBalance}`);
+        return sendJson(res, 200, {
+          phone,
+          userId,
+          points,
+          beforeBalance,
+          afterBalance,
+        });
+      } catch (_) {
+        return sendJson(res, 500, { error: 'UserDataInvalid', message: '用户数据读取失败' });
+      }
+    }
     // --- Jobs (App-facing) ---
     if (req.method === 'POST' && pathname === '/jobs/create') return handleCreateJob(req, res, body);
     if (req.method === 'POST' && pathname === '/jobs/markUploaded') return handleMarkUploaded(res, body);
