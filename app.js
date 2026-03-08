@@ -86,10 +86,77 @@ const DATA_DIR = path.join(__dirname, 'data');
 const DIRS = {
   points:   path.join(DATA_DIR, 'points'),
   jobs:     path.join(DATA_DIR, 'jobs'),
+  jobsArchive: path.join(DATA_DIR, 'jobs_archive'),
 };
+const STATS_DIR = path.join(DATA_DIR, 'stats', 'daily');
+const STATS_ARCHIVE_DIR = path.join(DATA_DIR, 'stats', 'archive');
 
 for (const dir of Object.values(DIRS)) {
   fs.mkdirSync(dir, { recursive: true });
+}
+[STATS_DIR, STATS_ARCHIVE_DIR].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
+
+const STATS_FLUSH_INTERVAL_MS = Math.max(1000, Number(process.env.STATS_FLUSH_INTERVAL_MS || 5000));
+const STATS_RETENTION_DAYS = Math.max(7, Number(process.env.STATS_RETENTION_DAYS || 90));
+const STATS_CLEANUP_INTERVAL_MS = Math.max(10 * 60 * 1000, Number(process.env.STATS_CLEANUP_INTERVAL_MS || (6 * 60 * 60 * 1000)));
+const JOBS_RETENTION_DAYS = Math.max(3, Number(process.env.JOBS_RETENTION_DAYS || 30));
+const JOBS_ARCHIVE_PURGE_DAYS = Math.max(JOBS_RETENTION_DAYS + 1, Number(process.env.JOBS_ARCHIVE_PURGE_DAYS || 365));
+const JOBS_CLEANUP_INTERVAL_MS = Math.max(10 * 60 * 1000, Number(process.env.JOBS_CLEANUP_INTERVAL_MS || (6 * 60 * 60 * 1000)));
+const JOBS_CLEANUP_BATCH = Math.max(10, Number(process.env.JOBS_CLEANUP_BATCH || 200));
+
+const JOBS_INDEX_REBUILD_INTERVAL_MS = Math.max(30000, Number(process.env.JOBS_INDEX_REBUILD_INTERVAL_MS || 60000));
+let jobsOwnerIndex = new Map();
+let jobsIndexBuiltAt = 0;
+
+function _addJobIdToOwnerIndex(index, ownerKey, jobId) {
+  const key = String(ownerKey || '').trim();
+  if (!key || !jobId) return;
+  let set = index.get(key);
+  if (!set) {
+    set = new Set();
+    index.set(key, set);
+  }
+  set.add(jobId);
+}
+
+function _removeJobIdFromOwnerIndex(index, ownerKey, jobId) {
+  const key = String(ownerKey || '').trim();
+  if (!key || !jobId) return;
+  const set = index.get(key);
+  if (!set) return;
+  set.delete(jobId);
+  if (set.size === 0) index.delete(key);
+}
+
+function _buildJobsOwnerIndex() {
+  const next = new Map();
+  try {
+    const dirs = fs.existsSync(DIRS.jobs) ? fs.readdirSync(DIRS.jobs) : [];
+    for (const jobId of dirs) {
+      const spec = readJobSpec(jobId);
+      if (!spec) continue;
+      _addJobIdToOwnerIndex(next, spec.ownerId, jobId);
+      _addJobIdToOwnerIndex(next, spec.deviceId, jobId);
+    }
+  } catch (_) {}
+  jobsOwnerIndex = next;
+  jobsIndexBuiltAt = Date.now();
+}
+
+function _ensureJobsOwnerIndex() {
+  if (!jobsIndexBuiltAt || (Date.now() - jobsIndexBuiltAt) > JOBS_INDEX_REBUILD_INTERVAL_MS) {
+    _buildJobsOwnerIndex();
+  }
+}
+
+function _indexNewJob(jobId, spec) {
+  _addJobIdToOwnerIndex(jobsOwnerIndex, spec && spec.ownerId, jobId);
+  _addJobIdToOwnerIndex(jobsOwnerIndex, spec && spec.deviceId, jobId);
+}
+
+function _indexDeleteJob(jobId, spec) {
+  _removeJobIdFromOwnerIndex(jobsOwnerIndex, spec && spec.ownerId, jobId);
+  _removeJobIdFromOwnerIndex(jobsOwnerIndex, spec && spec.deviceId, jobId);
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +561,187 @@ function getEffectiveId(req, body) {
 }
 
 // ---------------------------------------------------------------------------
+// DAU（日活）统计 + 归档策略
+// ---------------------------------------------------------------------------
+
+function _statsFile(date) {
+  return path.join(STATS_DIR, `${date}.json`);
+}
+
+let _statsCacheDate = null;
+let _statsCache = null;
+let _statsActiveUsers = new Set();
+let _statsDirty = false;
+let _statsFlushTimer = null;
+
+function _todayDate() {
+  return new Date().toISOString().substring(0, 10);
+}
+
+function _daysAgoDate(days) {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().substring(0, 10);
+}
+
+function _parseStatsFileName(name) {
+  const m = /^(\d{4}-\d{2}-\d{2})\.json$/.exec(String(name || ''));
+  if (!m) return null;
+  return { date: m[1], yearMonth: m[1].substring(0, 7) };
+}
+
+function _newStats(date) {
+  return {
+    date,
+    activeUsers: [],
+    dau: 0,
+    newUsers: 0,
+    platformBreakdown: {},
+    totalApiCalls: 0,
+    totalPointsUsed: 0,
+  };
+}
+
+function _normalizeStats(date, raw) {
+  if (!raw || typeof raw !== 'object') return _newStats(date);
+  const safe = _newStats(date);
+  if (typeof raw.date === 'string') safe.date = raw.date;
+  if (Number.isFinite(Number(raw.newUsers))) safe.newUsers = Number(raw.newUsers);
+  if (Number.isFinite(Number(raw.totalApiCalls))) safe.totalApiCalls = Number(raw.totalApiCalls);
+  if (Number.isFinite(Number(raw.totalPointsUsed))) safe.totalPointsUsed = Number(raw.totalPointsUsed);
+  if (Array.isArray(raw.activeUsers)) {
+    const seen = new Set();
+    for (const item of raw.activeUsers) {
+      const uid = String(item || '').trim();
+      if (!uid || seen.has(uid)) continue;
+      seen.add(uid);
+      safe.activeUsers.push(uid);
+    }
+  }
+  safe.dau = safe.activeUsers.length;
+  if (raw.platformBreakdown && typeof raw.platformBreakdown === 'object') {
+    for (const key of Object.keys(raw.platformBreakdown)) {
+      const n = Number(raw.platformBreakdown[key]);
+      safe.platformBreakdown[key] = Number.isFinite(n) && n > 0 ? n : 0;
+    }
+  }
+  return safe;
+}
+
+function _loadStats(date) {
+  const file = _statsFile(date);
+  try {
+    if (!fs.existsSync(file)) return _newStats(date);
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    return _normalizeStats(date, raw);
+  } catch (_) {
+    return _newStats(date);
+  }
+}
+
+function _flushStatsSync() {
+  if (!_statsDirty || !_statsCache || !_statsCacheDate) return;
+  _statsCache.dau = _statsActiveUsers.size;
+  const file = _statsFile(_statsCacheDate);
+  try {
+    fs.writeFileSync(file, JSON.stringify(_statsCache, null, 2), 'utf-8');
+    _statsDirty = false;
+  } catch (e) {
+    console.error('[stats] flush failed:', e && e.message ? e.message : e);
+  }
+}
+
+function _scheduleStatsFlush() {
+  _statsDirty = true;
+  if (_statsFlushTimer) return;
+  _statsFlushTimer = setTimeout(() => {
+    _statsFlushTimer = null;
+    _flushStatsSync();
+  }, STATS_FLUSH_INTERVAL_MS);
+  if (_statsFlushTimer && typeof _statsFlushTimer.unref === 'function') {
+    _statsFlushTimer.unref();
+  }
+}
+
+function _ensureTodayStats() {
+  const today = _todayDate();
+  if (_statsCacheDate !== today || !_statsCache) {
+    _flushStatsSync();
+    _statsCacheDate = today;
+    _statsCache = _loadStats(today);
+    _statsActiveUsers = new Set(_statsCache.activeUsers);
+    _statsCache.dau = _statsActiveUsers.size;
+  }
+  return _statsCache;
+}
+
+function _archiveOldStatsFiles() {
+  try {
+    if (!fs.existsSync(STATS_DIR)) return;
+    const cutoffDate = _daysAgoDate(STATS_RETENTION_DAYS);
+    const entries = fs.readdirSync(STATS_DIR);
+    let archived = 0;
+    for (const name of entries) {
+      const parsed = _parseStatsFileName(name);
+      if (!parsed) continue;
+      if (parsed.date >= cutoffDate) continue;
+      const src = path.join(STATS_DIR, name);
+      const monthDir = path.join(STATS_ARCHIVE_DIR, parsed.yearMonth);
+      if (!fs.existsSync(monthDir)) fs.mkdirSync(monthDir, { recursive: true });
+      const dst = path.join(monthDir, name);
+      if (fs.existsSync(dst)) {
+        try {
+          fs.unlinkSync(src);
+          archived++;
+        } catch (_) {}
+        continue;
+      }
+      fs.renameSync(src, dst);
+      archived++;
+    }
+    if (archived > 0) {
+      console.log(`[stats] archived ${archived} file(s), keepDays=${STATS_RETENTION_DAYS}`);
+    }
+  } catch (e) {
+    console.error('[stats] archive failed:', e && e.message ? e.message : e);
+  }
+}
+
+function _runStatsMaintenance() {
+  _flushStatsSync();
+  _archiveOldStatsFiles();
+}
+
+function recordActivity({ userId, platform, action }) {
+  const uid = String(userId || '').trim();
+  if (!uid) return;
+  const stats = _ensureTodayStats();
+  if (!_statsActiveUsers.has(uid)) {
+    _statsActiveUsers.add(uid);
+    stats.activeUsers.push(uid);
+  }
+  stats.dau = _statsActiveUsers.size;
+  const platformKey = String(platform || '').trim();
+  if (platformKey) {
+    stats.platformBreakdown[platformKey] = (stats.platformBreakdown[platformKey] || 0) + 1;
+  }
+  if (action === 'api_call') {
+    stats.totalApiCalls = (stats.totalApiCalls || 0) + 1;
+  }
+  _scheduleStatsFlush();
+}
+
+process.on('beforeExit', _flushStatsSync);
+process.on('exit', _flushStatsSync);
+
+_runStatsMaintenance();
+const _statsCleanupTimer = setInterval(_runStatsMaintenance, STATS_CLEANUP_INTERVAL_MS);
+if (_statsCleanupTimer && typeof _statsCleanupTimer.unref === 'function') {
+  _statsCleanupTimer.unref();
+}
+
+// ---------------------------------------------------------------------------
 // API Key 验证 (App 请求)
 // ---------------------------------------------------------------------------
 
@@ -691,6 +939,110 @@ function writeProgress(jobId, progress) {
   writeJsonFile(path.join(getJobDir(jobId), 'progress.json'), progress);
 }
 
+const _FINAL_JOB_STATES = new Set(['DONE', 'FAILED', 'CANCELED']);
+const _ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+function _jobTimestampMs(jobDir, spec, progress) {
+  const candidates = [
+    progress && progress.updatedAt,
+    spec && spec.updatedAt,
+    spec && spec.createdAt,
+  ];
+  for (const c of candidates) {
+    const ms = Date.parse(String(c || ''));
+    if (Number.isFinite(ms)) return ms;
+  }
+  try {
+    return fs.statSync(jobDir).mtimeMs;
+  } catch (_) {
+    return NaN;
+  }
+}
+
+function _archiveMonthByMs(ms) {
+  return new Date(ms).toISOString().substring(0, 7);
+}
+
+function _archiveOldJobs() {
+  try {
+    if (!fs.existsSync(DIRS.jobs)) return;
+    const cutoffMs = Date.now() - (JOBS_RETENTION_DAYS * _ONE_DAY_MS);
+    const entries = fs.readdirSync(DIRS.jobs, { withFileTypes: true });
+    let archived = 0;
+    for (const entry of entries) {
+      if (archived >= JOBS_CLEANUP_BATCH) break;
+      if (!entry.isDirectory()) continue;
+      const jobId = entry.name;
+      if (_activeJobs.has(jobId)) continue;
+      const jobDir = path.join(DIRS.jobs, jobId);
+      const spec = readJsonFile(path.join(jobDir, 'job.json'));
+      const progress = readJsonFile(path.join(jobDir, 'progress.json'));
+      const state = String(progress && progress.state || '').toUpperCase();
+      if (!_FINAL_JOB_STATES.has(state)) continue;
+      const ts = _jobTimestampMs(jobDir, spec, progress);
+      if (!Number.isFinite(ts) || ts >= cutoffMs) continue;
+
+      const monthDir = path.join(DIRS.jobsArchive, _archiveMonthByMs(ts));
+      if (!fs.existsSync(monthDir)) fs.mkdirSync(monthDir, { recursive: true });
+      const dst = path.join(monthDir, jobId);
+      try {
+        if (fs.existsSync(dst)) {
+          fs.rmSync(jobDir, { recursive: true, force: true });
+        } else {
+          fs.renameSync(jobDir, dst);
+        }
+        if (spec) _indexDeleteJob(jobId, spec);
+        archived++;
+      } catch (_) {}
+    }
+    if (archived > 0) {
+      _buildJobsOwnerIndex();
+      console.log(`[jobs] archived ${archived} job(s), keepDays=${JOBS_RETENTION_DAYS}`);
+    }
+  } catch (e) {
+    console.error('[jobs] archive failed:', e && e.message ? e.message : e);
+  }
+}
+
+function _purgeArchivedJobs() {
+  try {
+    if (!fs.existsSync(DIRS.jobsArchive)) return;
+    const cutoffMs = Date.now() - (JOBS_ARCHIVE_PURGE_DAYS * _ONE_DAY_MS);
+    let deleted = 0;
+    const monthDirs = fs.readdirSync(DIRS.jobsArchive, { withFileTypes: true });
+    for (const monthDirEntry of monthDirs) {
+      if (deleted >= JOBS_CLEANUP_BATCH) break;
+      if (!monthDirEntry.isDirectory()) continue;
+      const monthDir = path.join(DIRS.jobsArchive, monthDirEntry.name);
+      const jobDirs = fs.readdirSync(monthDir, { withFileTypes: true });
+      for (const jobEntry of jobDirs) {
+        if (deleted >= JOBS_CLEANUP_BATCH) break;
+        if (!jobEntry.isDirectory()) continue;
+        const jobDir = path.join(monthDir, jobEntry.name);
+        const spec = readJsonFile(path.join(jobDir, 'job.json'));
+        const progress = readJsonFile(path.join(jobDir, 'progress.json'));
+        const state = String(progress && progress.state || '').toUpperCase();
+        if (state && !_FINAL_JOB_STATES.has(state)) continue;
+        const ts = _jobTimestampMs(jobDir, spec, progress);
+        if (!Number.isFinite(ts) || ts >= cutoffMs) continue;
+        try {
+          fs.rmSync(jobDir, { recursive: true, force: true });
+          deleted++;
+        } catch (_) {}
+      }
+      try {
+        const remains = fs.readdirSync(monthDir);
+        if (remains.length === 0) fs.rmdirSync(monthDir);
+      } catch (_) {}
+    }
+    if (deleted > 0) {
+      console.log(`[jobs] purged ${deleted} archived job(s), archiveKeepDays=${JOBS_ARCHIVE_PURGE_DAYS}`);
+    }
+  } catch (e) {
+    console.error('[jobs] purge failed:', e && e.message ? e.message : e);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // API: POST /jobs/create
 // ---------------------------------------------------------------------------
@@ -746,6 +1098,7 @@ function handleCreateJob(req, res, body) {
 
   writeJobSpec(jobId, spec);
   writeProgress(jobId, progress);
+  _indexNewJob(jobId, spec);
 
   // 生成 COS presign URL (EPUB 上传)
   const sourceKey = buildCosKey(`${jobId}/source.epub`);
@@ -881,22 +1234,36 @@ function handleListJobs(req, res, deviceId) {
   const userId = getUserIdFromReq(req);
   if (!deviceId && !userId) return sendJson(res, 400, { error: 'BadRequest', message: 'deviceId required' });
 
+  _ensureJobsOwnerIndex();
+  const candidateJobIds = new Set();
+  const addCandidates = (id) => {
+    const key = String(id || '').trim();
+    if (!key) return;
+    const set = jobsOwnerIndex.get(key);
+    if (!set) return;
+    for (const jobId of set) candidateJobIds.add(jobId);
+  };
+  addCandidates(userId);
+  addCandidates(deviceId);
+
   const jobs = [];
-  try {
-    const dirs = fs.readdirSync(DIRS.jobs);
-    for (const jobId of dirs) {
-      const job = readJobSpec(jobId);
-      if (!job) continue;
-      // 匹配: ownerId == userId 或 deviceId == deviceId 或旧任务 deviceId == deviceId
-      const match = (userId && (job.ownerId === userId || job.deviceId === userId))
-                 || (deviceId && (job.deviceId === deviceId || job.ownerId === deviceId));
-      if (match) {
-        const progress = readProgress(jobId) || {};
-        const { coverImage: _, ...jobWithoutCover } = job;
-        jobs.push({ ...jobWithoutCover, progress });
-      }
+  let staleEntries = 0;
+  for (const jobId of candidateJobIds) {
+    const job = readJobSpec(jobId);
+    if (!job) {
+      staleEntries++;
+      continue;
     }
-  } catch (_) {}
+    // 匹配: ownerId == userId 或 deviceId == deviceId 或旧任务 deviceId == deviceId
+    const match = (userId && (job.ownerId === userId || job.deviceId === userId))
+               || (deviceId && (job.deviceId === deviceId || job.ownerId === deviceId));
+    if (!match) continue;
+    const progress = readProgress(jobId) || {};
+    const { coverImage: _, ...jobWithoutCover } = job;
+    jobs.push({ ...jobWithoutCover, progress });
+  }
+
+  if (staleEntries > 0) _buildJobsOwnerIndex();
 
   // 按创建时间倒序
   jobs.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
@@ -931,6 +1298,7 @@ function handleDeleteJob(res, body) {
   // 删除任务目录
   const jobDir = getJobDir(jobId);
   try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch (_) {}
+  _indexDeleteJob(jobId, spec);
 
   return sendJson(res, 200, { ok: true, refundedPoints: refunded });
 }
@@ -1361,6 +1729,17 @@ function callHunyuanTranslation(text, srcLang, tgtLang, glossaryIds) {
 }
 
 const _activeJobs = new Set();
+
+function _runJobsMaintenance() {
+  _archiveOldJobs();
+  _purgeArchivedJobs();
+}
+
+_runJobsMaintenance();
+const _jobsCleanupTimer = setInterval(_runJobsMaintenance, JOBS_CLEANUP_INTERVAL_MS);
+if (_jobsCleanupTimer && typeof _jobsCleanupTimer.unref === 'function') {
+  _jobsCleanupTimer.unref();
+}
 
 async function processTranslationJob(jobId) {
   if (_activeJobs.has(jobId)) return;
@@ -2112,6 +2491,8 @@ const server = http.createServer(async (req, res) => {
         fs.writeFileSync(_userFile(phone.replace(/[^0-9]/g, '')), JSON.stringify(user, null, 2), 'utf-8');
       }
       const balance = readPointsBalance(user.userId);
+      const loginPlatform = String(req.headers['x-platform'] || '').trim();
+      recordActivity({ userId: user.userId, platform: loginPlatform, action: 'login' });
       return sendJson(res, 200, {
         token: user.token, userId: user.userId,
         phone: user.phone.substring(0, 3) + '****' + user.phone.substring(7),
@@ -2143,6 +2524,16 @@ const server = http.createServer(async (req, res) => {
         console.log(`[Auth] Reset device ${deviceId} points to 0 after logout`);
       }
       return sendJson(res, 200, { success: true });
+    }
+
+    if (req.method === 'GET' && pathname === '/stats/today') {
+      if (!verifyApiKey(req)) return sendJson(res, 401, { error: 'Unauthorized' });
+      try {
+        const stats = _ensureTodayStats();
+        return sendJson(res, 200, stats);
+      } catch (_) {
+        return sendJson(res, 200, { date: _todayDate(), dau: 0, activeUsers: [], totalApiCalls: 0 });
+      }
     }
 
     // --- Admin Points (for points-gift-tool) ---
@@ -2209,6 +2600,21 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 500, { error: 'UserDataInvalid', message: '用户数据读取失败' });
       }
     }
+
+    const userIdForActivity = getUserIdFromReq(req);
+    if (
+      userIdForActivity
+      && (
+        pathname.startsWith('/jobs/')
+        || pathname.startsWith('/billing/')
+        || pathname === '/checkin'
+        || pathname === '/checkin/status'
+      )
+    ) {
+      const platform = String(req.headers['x-platform'] || '').trim();
+      recordActivity({ userId: userIdForActivity, platform, action: 'api_call' });
+    }
+
     // --- Jobs (App-facing) ---
     if (req.method === 'POST' && pathname === '/jobs/create') return handleCreateJob(req, res, body);
     if (req.method === 'POST' && pathname === '/jobs/markUploaded') return handleMarkUploaded(res, body);
