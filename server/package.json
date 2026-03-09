@@ -1,6 +1,7 @@
 {
-  "name": "airtranslate",
+  "name": "airtranslate-server",
   "version": "1.0.0",
+  "private": true,
   "description": "EPUB translation service",
   "main": "app.js",
   "scripts": {

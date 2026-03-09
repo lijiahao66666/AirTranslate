@@ -1,143 +1,143 @@
-# AirTranslate — EPUB 全本翻译工具
+# AirTranslate 鈥?EPUB 鍏ㄦ湰缈昏瘧宸ュ叿
 
-上传 EPUB → 选择翻译引擎 → 全本翻译 → 下载双语/纯译文书籍
+涓婁紶 EPUB 鈫?閫夋嫨缈昏瘧寮曟搸 鈫?鍏ㄦ湰缈昏瘧 鈫?涓嬭浇鍙岃/绾瘧鏂囦功绫?
 
-## 核心功能
+## 鏍稿績鍔熻兘
 
-- 📖 **EPUB 全本翻译** — 上传书籍，自动翻译全部章节
-- 🧠 **AI 翻译·个人** — 本地 vLLM GPU 推理（通过 frp 内网穿透），支持术语表和上下文翻译
-- 🌐 **AI 翻译·在线** — 腾讯混元翻译 API，支持术语库（GlossaryIDs），无需本地 GPU
-- 🤖 **机器翻译** — Azure Edge → MyMemory → Google 三引擎链式退避，完全免费
-- 📝 **双语/纯译文** — 支持双语对照和纯译文两种输出格式
-- 🌍 **33种语言** — 中英日韩法德西俄等主流语言全覆盖
-- 💰 **积分系统** — AI 翻译按字数消耗积分，机器翻译免费
-- 💾 **本地优先列表** — Web 存浏览器缓存，移动端存 SQLite，本地封面不上传服务器
+- 馃摉 **EPUB 鍏ㄦ湰缈昏瘧** 鈥?涓婁紶涔︾睄锛岃嚜鍔ㄧ炕璇戝叏閮ㄧ珷鑺?
+- 馃 **AI 缈昏瘧路涓汉** 鈥?鏈湴 vLLM GPU 鎺ㄧ悊锛堥€氳繃 frp 鍐呯綉绌块€忥級锛屾敮鎸佹湳璇〃鍜屼笂涓嬫枃缈昏瘧
+- 馃寪 **AI 缈昏瘧路鍦ㄧ嚎** 鈥?鑵捐娣峰厓缈昏瘧 API锛屾敮鎸佹湳璇簱锛圙lossaryIDs锛夛紝鏃犻渶鏈湴 GPU
+- 馃 **鏈哄櫒缈昏瘧** 鈥?Azure Edge 鈫?MyMemory 鈫?Google 涓夊紩鎿庨摼寮忛€€閬匡紝瀹屽叏鍏嶈垂
+- 馃摑 **鍙岃/绾瘧鏂?* 鈥?鏀寔鍙岃瀵圭収鍜岀函璇戞枃涓ょ杈撳嚭鏍煎紡
+- 馃實 **33绉嶈瑷€** 鈥?涓嫳鏃ラ煩娉曞痉瑗夸縿绛変富娴佽瑷€鍏ㄨ鐩?
+- 馃挵 **绉垎绯荤粺** 鈥?AI 缈昏瘧鎸夊瓧鏁版秷鑰楃Н鍒嗭紝鏈哄櫒缈昏瘧鍏嶈垂
+- 馃捑 **鏈湴浼樺厛鍒楄〃** 鈥?Web 瀛樻祻瑙堝櫒缂撳瓨锛岀Щ鍔ㄧ瀛?SQLite锛屾湰鍦板皝闈笉涓婁紶鏈嶅姟鍣?
 
-## 项目架构
+## 椤圭洰鏋舵瀯
 
 ```
 AirTranslate/
-├── app.js              # 服务端 (所有翻译引擎内嵌, 端口 9001)
-├── .env                # 服务端环境变量
-├── config.json         # 运行时配置 (积分/版本/AI开关)
-├── data/               # 本地数据 (积分/任务/进度)
-├── flutter_app/        # Flutter 客户端 App
-│   └── scripts/
-│       ├── build_config.ps1    # 统一构建配置 (备案前/后切换)
-│       ├── build_web_release.ps1
-│       ├── build_android_aab_release.ps1
-│       ├── build_android_apk_arm64_release.ps1
-│       └── build_ios_ipa_release.sh
-├── frp/                # frp 内网穿透 (frpc.exe + frpc.toml)
-└── scripts/
-    ├── start_local.ps1  # 一键启动本地 AI (frpc + vLLM)
-    ├── stop_local.ps1   # 一键停止本地 AI
-    └── start_vllm.sh    # WSL 中启动 vLLM (由 start_local.ps1 调用)
+鈹溾攢鈹€ app.js              # 鏈嶅姟绔?(鎵€鏈夌炕璇戝紩鎿庡唴宓? 绔彛 9001)
+鈹溾攢鈹€ .env                # 鏈嶅姟绔幆澧冨彉閲?
+鈹溾攢鈹€ config.json         # 杩愯鏃堕厤缃?(绉垎/鐗堟湰/AI寮€鍏?
+鈹溾攢鈹€ data/               # 鏈湴鏁版嵁 (绉垎/浠诲姟/杩涘害)
+鈹溾攢鈹€ flutter_app/        # Flutter 瀹㈡埛绔?App
+鈹?  鈹斺攢鈹€ scripts/
+鈹?      鈹溾攢鈹€ build_config.ps1    # 缁熶竴鏋勫缓閰嶇疆 (澶囨鍓?鍚庡垏鎹?
+鈹?      鈹溾攢鈹€ build_web_release.ps1
+鈹?      鈹溾攢鈹€ build_android_aab_release.ps1
+鈹?      鈹溾攢鈹€ build_android_apk_arm64_release.ps1
+鈹?      鈹斺攢鈹€ build_ios_ipa_release.sh
+鈹溾攢鈹€ frp/                # frp 鍐呯綉绌块€?(frpc.exe + frpc.toml)
+鈹斺攢鈹€ scripts/
+    鈹溾攢鈹€ start_local.ps1  # 涓€閿惎鍔ㄦ湰鍦?AI (frpc + vLLM)
+    鈹溾攢鈹€ stop_local.ps1   # 涓€閿仠姝㈡湰鍦?AI
+    鈹斺攢鈹€ start_vllm.sh    # WSL 涓惎鍔?vLLM (鐢?start_local.ps1 璋冪敤)
 ```
 
-### 工作流程
+### 宸ヤ綔娴佺▼
 
-1. **Flutter App** → 创建任务并上传 EPUB
-2. **服务端** (`app.js`) → 管理任务/积分，直接执行翻译（三引擎独立并发）
-3. **Flutter App** → 轮询进度并下载结果
+1. **Flutter App** 鈫?鍒涘缓浠诲姟骞朵笂浼?EPUB
+2. **鏈嶅姟绔?* (`app.js`) 鈫?绠＄悊浠诲姟/绉垎锛岀洿鎺ユ墽琛岀炕璇戯紙涓夊紩鎿庣嫭绔嬪苟鍙戯級
+3. **Flutter App** 鈫?杞杩涘害骞朵笅杞界粨鏋?
 
-### 翻译引擎并发架构
+### 缈昏瘧寮曟搸骞跺彂鏋舵瀯
 
-三种引擎使用独立信号量，互不阻塞：
+涓夌寮曟搸浣跨敤鐙珛淇″彿閲忥紝浜掍笉闃诲锛?
 
-| 引擎 | 并发数 | 翻译粒度 | 说明 |
+| 寮曟搸 | 骞跺彂鏁?| 缈昏瘧绮掑害 | 璇存槑 |
 |------|--------|---------|------|
-| 机器翻译 | 10 | 段落级 | Azure Edge → MyMemory → Google 链式退避 |
-| AI·在线 | 3 | 章节级(分块) | 腾讯混元翻译 API，支持术语表 |
-| AI·个人 | 1 | 章节级(分块) | 通过 frp 穿透访问本地 vLLM |
+| 鏈哄櫒缈昏瘧 | 10 | 娈佃惤绾?| Azure Edge 鈫?MyMemory 鈫?Google 閾惧紡閫€閬?|
+| AI路鍦ㄧ嚎 | 3 | 绔犺妭绾?鍒嗗潡) | 鑵捐娣峰厓缈昏瘧 API锛屾敮鎸佹湳璇〃 |
+| AI路涓汉 | 1 | 绔犺妭绾?鍒嗗潡) | 閫氳繃 frp 绌块€忚闂湰鍦?vLLM |
 
-### 数据存储
+### 鏁版嵁瀛樺偍
 
-| 数据 | 存储位置 | 说明 |
+| 鏁版嵁 | 瀛樺偍浣嶇疆 | 璇存槑 |
 |------|---------|------|
-| 积分 | 服务器本地 `data/` | JSON 文件 |
-| 任务/进度 | 服务器本地 `data/` | JSON 文件 |
-| EPUB 源文件 | 腾讯云 COS | presign URL 直传 |
-| EPUB 结果文件 | 腾讯云 COS | presign URL 直传 |
-| 术语表 | 腾讯云 COS | presign URL 直传 |
-| 任务列表缓存 | 客户端本地 | Web: SharedPreferences / 移动端: SQLite |
-| 书籍封面 | 客户端本地 | 仅本地存储，不上传服务端 |
+| 绉垎 | 鏈嶅姟鍣ㄦ湰鍦?`data/` | JSON 鏂囦欢 |
+| 浠诲姟/杩涘害 | 鏈嶅姟鍣ㄦ湰鍦?`data/` | JSON 鏂囦欢 |
+| EPUB 婧愭枃浠?| 鑵捐浜?COS | presign URL 鐩翠紶 |
+| EPUB 缁撴灉鏂囦欢 | 鑵捐浜?COS | presign URL 鐩翠紶 |
+| 鏈琛?| 鑵捐浜?COS | presign URL 鐩翠紶 |
+| 浠诲姟鍒楄〃缂撳瓨 | 瀹㈡埛绔湰鍦?| Web: SharedPreferences / 绉诲姩绔? SQLite |
+| 涔︾睄灏侀潰 | 瀹㈡埛绔湰鍦?| 浠呮湰鍦板瓨鍌紝涓嶄笂浼犳湇鍔＄ |
 
-## 环境要求
+## 鐜瑕佹眰
 
-### 服务端 (轻量服务器)
-- **规格**: 2核 2GB 即可
-- **Node.js**: 18+ (推荐 20+；若用 Node 18 会使用 cheerio 1.0.0-rc.12 以兼容)
-- **PM2**: 进程管理 (推荐)
-- **系统工具**: `unzip`、`zip` 命令 (用于 EPUB 解压/打包)
+### 鏈嶅姟绔?(杞婚噺鏈嶅姟鍣?
+- **瑙勬牸**: 2鏍?2GB 鍗冲彲
+- **Node.js**: 18+ (鎺ㄨ崘 20+锛涜嫢鐢?Node 18 浼氫娇鐢?cheerio 1.0.0-rc.12 浠ュ吋瀹?
+- **PM2**: 杩涚▼绠＄悊 (鎺ㄨ崘)
+- **绯荤粺宸ュ叿**: `unzip`銆乣zip` 鍛戒护 (鐢ㄤ簬 EPUB 瑙ｅ帇/鎵撳寘)
 
-### 本地 AI (可选，需 GPU 机器 + frp)
-- **GPU**: NVIDIA 显卡，显存 ≥ 16GB（如 RTX 4060 Ti 16GB）
-- **WSL2**: Ubuntu（用于运行 vLLM）
-- **frp**: 内网穿透，将本地 vLLM API 暴露给服务端
+### 鏈湴 AI (鍙€夛紝闇€ GPU 鏈哄櫒 + frp)
+- **GPU**: NVIDIA 鏄惧崱锛屾樉瀛?鈮?16GB锛堝 RTX 4060 Ti 16GB锛?
+- **WSL2**: Ubuntu锛堢敤浜庤繍琛?vLLM锛?
+- **frp**: 鍐呯綉绌块€忥紝灏嗘湰鍦?vLLM API 鏆撮湶缁欐湇鍔＄
 
-## 服务端部署
+## 鏈嶅姟绔儴缃?
 
-### 1. 配置服务端 .env
+### 1. 閰嶇疆鏈嶅姟绔?.env
 
 ```env
 PORT=9001
 COS_BUCKET=your-bucket
 COS_REGION=ap-guangzhou
-TENCENT_SECRET_ID=你的SecretId
-TENCENT_SECRET_KEY=你的SecretKey
+TENCENT_SECRET_ID=浣犵殑SecretId
+TENCENT_SECRET_KEY=浣犵殑SecretKey
 COS_PREFIX=translate/
-API_KEY=你的客户端鉴权密钥
+API_KEY=浣犵殑瀹㈡埛绔壌鏉冨瘑閽?
 
-# vLLM 远程地址 (通过 frp 内网穿透暴露的本地 GPU 推理服务)
+# vLLM 杩滅▼鍦板潃 (閫氳繃 frp 鍐呯綉绌块€忔毚闇茬殑鏈湴 GPU 鎺ㄧ悊鏈嶅姟)
 VLLM_API_URL=http://your-server:7001
 VLLM_MODEL_NAME=HY-MT1.5
 VLLM_MAX_MODEL_LEN=8192
 VLLM_MAX_OUTPUT_TOKENS=4096
 
-# 混元翻译 API (在线 AI 翻译)
+# 娣峰厓缈昏瘧 API (鍦ㄧ嚎 AI 缈昏瘧)
 HY_TRANSLATION_MODEL=hunyuan-translation
 HY_REGION=ap-guangzhou
 
-# 短信验证码 (腾讯云 SMS)
-SMS_APP_ID=你的AppId
-SMS_SIGN=你的签名
-SMS_TEMPLATE_ID=你的模板Id
+# 鐭俊楠岃瘉鐮?(鑵捐浜?SMS)
+SMS_APP_ID=浣犵殑AppId
+SMS_SIGN=浣犵殑绛惧悕
+SMS_TEMPLATE_ID=浣犵殑妯℃澘Id
 ```
 
-### 2. 上传到服务器
+### 2. 涓婁紶鍒版湇鍔″櫒
 
 ```bash
-scp app.js package.json package-lock.json .env root@your-server:/www/airtranslate/
+scp -r server root@your-server:/www/airtranslate/
 ssh root@your-server
-cd /www/airtranslate
+cd /www/airtranslate/server
 npm install --omit=dev
-pm2 start app.js --name airtranslate
+pm2 start ecosystem.config.cjs
 pm2 save
 ```
 
-### 3. 验证
+### 3. 楠岃瘉
 
 ```bash
 curl http://your-server:9001/health
 # {"status":"ok","service":"AirTranslate",...}
 ```
 
-## 本地 AI 部署 (可选)
+## 鏈湴 AI 閮ㄧ讲 (鍙€?
 
-如果需要使用"AI翻译·个人"功能，需要在有 GPU 的本地机器上部署 vLLM + frp。
+濡傛灉闇€瑕佷娇鐢?AI缈昏瘧路涓汉"鍔熻兘锛岄渶瑕佸湪鏈?GPU 鐨勬湰鍦版満鍣ㄤ笂閮ㄧ讲 vLLM + frp銆?
 
-### 1. 下载模型
+### 1. 涓嬭浇妯″瀷
 
-从 HuggingFace 下载 [HY-MT1.5-7B-FP8](https://huggingface.co/tencent/HY-MT1.5-7B-FP8) 到 WSL 的 `~/models/` 目录。
+浠?HuggingFace 涓嬭浇 [HY-MT1.5-7B-FP8](https://huggingface.co/tencent/HY-MT1.5-7B-FP8) 鍒?WSL 鐨?`~/models/` 鐩綍銆?
 
-### 2. 配置 frp 目录
+### 2. 閰嶇疆 frp 鐩綍
 
-在项目根目录下新建 `frp/` 目录，从 [frp Releases](https://github.com/fatedier/frp/releases) 下载 Windows 版，将 `frpc.exe` 放入 `frp/` 中。
+鍦ㄩ」鐩牴鐩綍涓嬫柊寤?`frp/` 鐩綍锛屼粠 [frp Releases](https://github.com/fatedier/frp/releases) 涓嬭浇 Windows 鐗堬紝灏?`frpc.exe` 鏀惧叆 `frp/` 涓€?
 
-### 3. 服务端配置 frps
+### 3. 鏈嶅姟绔厤缃?frps
 
-在公网服务器上安装并运行 frps：
+鍦ㄥ叕缃戞湇鍔″櫒涓婂畨瑁呭苟杩愯 frps锛?
 
 ```toml
 # /etc/frp/frps.toml
@@ -145,22 +145,22 @@ bindPort = 7000
 ```
 
 ```bash
-# 用 systemd 管理
+# 鐢?systemd 绠＄悊
 sudo systemctl start frps
 ```
 
-然后在服务端 `.env` 中配置穿透后的地址：
+鐒跺悗鍦ㄦ湇鍔＄ `.env` 涓厤缃┛閫忓悗鐨勫湴鍧€锛?
 
 ```env
 VLLM_API_URL=http://127.0.0.1:7001
 ```
 
-### 4. 本地配置 frpc
+### 4. 鏈湴閰嶇疆 frpc
 
-编辑 `frp/frpc.toml`，填入服务器 IP：
+缂栬緫 `frp/frpc.toml`锛屽～鍏ユ湇鍔″櫒 IP锛?
 
 ```toml
-serverAddr = "你的服务器IP"
+serverAddr = "浣犵殑鏈嶅姟鍣↖P"
 serverPort = 7000
 
 [[proxies]]
@@ -171,79 +171,79 @@ localPort = 8000
 remotePort = 7001
 ```
 
-### 5. 一键启动
+### 5. 涓€閿惎鍔?
 
 ```powershell
 .\scripts\start_local.ps1
 ```
 
-脚本会从 `frp/` 目录启动 `frpc.exe` 并读取 `frpc.toml`，同时在 WSL 中后台启动 vLLM，日志输出到 `logs/` 目录。
+鑴氭湰浼氫粠 `frp/` 鐩綍鍚姩 `frpc.exe` 骞惰鍙?`frpc.toml`锛屽悓鏃跺湪 WSL 涓悗鍙板惎鍔?vLLM锛屾棩蹇楄緭鍑哄埌 `logs/` 鐩綍銆?
 
-### 6. 停止
+### 6. 鍋滄
 
 ```powershell
 .\scripts\stop_local.ps1
 ```
 
-### 工作原理
+### 宸ヤ綔鍘熺悊
 
 ```
-本地机器                          公网服务器
-┌─────────┐    frp tunnel     ┌──────────┐
-│ vLLM    │◄──────────────────│ app.js   │
-│ :8000   │  (localPort:8000  │ 调用     │
-│ (WSL)   │   remotePort:7001)│ :7001    │
-└─────────┘                   └──────────┘
-     │                              │
-  frpc.exe ─────────────────► frps :7000
+鏈湴鏈哄櫒                          鍏綉鏈嶅姟鍣?
+鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?   frp tunnel     鈹屸攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?
+鈹?vLLM    鈹傗梽鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?app.js   鈹?
+鈹?:8000   鈹? (localPort:8000  鈹?璋冪敤     鈹?
+鈹?(WSL)   鈹?  remotePort:7001)鈹?:7001    鈹?
+鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?                  鈹斺攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹?
+     鈹?                             鈹?
+  frpc.exe 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈻?frps :7000
 ```
 
-服务端每 30 秒自动检测 vLLM 是否可达，在线时客户端会显示"个人部署"选项，离线时自动隐藏。
+鏈嶅姟绔瘡 30 绉掕嚜鍔ㄦ娴?vLLM 鏄惁鍙揪锛屽湪绾挎椂瀹㈡埛绔細鏄剧ず"涓汉閮ㄧ讲"閫夐」锛岀绾挎椂鑷姩闅愯棌銆?
 
-## config.json 运行时配置
+## config.json 杩愯鏃堕厤缃?
 
 ```json
 {
-  "local_ai_enabled": true,      // 是否启用个人 AI 选项
-  "checkin_enabled": true,        // 每日签到开关
-  "checkin_points": 5000,         // 签到赠送积分
-  "initial_grant_points": 500000, // 新用户赠送积分
-  "billing_unit_chars": 100,      // 个人AI: 1积分/100字
-  "billing_unit_cost": 1,         // 每单位积分
-  "online_ai_billing_multiplier": 100  // 在线AI: 1积分/字 (100积分/100字)
+  "local_ai_enabled": true,      // 鏄惁鍚敤涓汉 AI 閫夐」
+  "checkin_enabled": true,        // 姣忔棩绛惧埌寮€鍏?
+  "checkin_points": 5000,         // 绛惧埌璧犻€佺Н鍒?
+  "initial_grant_points": 500000, // 鏂扮敤鎴疯禒閫佺Н鍒?
+  "billing_unit_chars": 100,      // 涓汉AI: 1绉垎/100瀛?
+  "billing_unit_cost": 1,         // 姣忓崟浣嶇Н鍒?
+  "online_ai_billing_multiplier": 100  // 鍦ㄧ嚎AI: 1绉垎/瀛?(100绉垎/100瀛?
 }
 ```
 
-将 `local_ai_enabled` 设为 `false` 可完全关闭个人 AI 选项，客户端不会显示。
+灏?`local_ai_enabled` 璁句负 `false` 鍙畬鍏ㄥ叧闂釜浜?AI 閫夐」锛屽鎴风涓嶄細鏄剧ず銆?
 
-## 服务端 API
+## 鏈嶅姟绔?API
 
-| 路由 | 说明 |
+| 璺敱 | 璇存槑 |
 |------|------|
-| `GET /health` | 健康检查 |
-| `GET /config` | 获取运行时配置 (含 local_ai_available 动态状态) |
-| `POST /jobs/create` | 创建翻译任务 |
-| `POST /jobs/markUploaded` | 标记上传完成 |
-| `POST /jobs/start` | 启动翻译 |
-| `GET /jobs/progress?jobId=` | 查询任务进度 |
-| `GET /jobs/download?jobId=` | 获取结果下载 URL |
-| `GET /jobs/list?deviceId=` | 用户任务列表 |
-| `POST /jobs/delete` | 删除/取消任务 |
-| `POST /billing/init` | 初始化积分 |
-| `GET /billing/balance?deviceId=` | 查询积分余额 |
-| `POST /checkin` | 每日签到 |
-| `POST /checkin/status` | 签到状态查询 |
-| `POST /auth/sms/send` | 发送验证码 |
-| `POST /auth/sms/verify` | 验证码登录 |
-| `POST /auth/profile` | 用户信息 |
-| `POST /auth/logout` | 退出登录 |
+| `GET /health` | 鍋ュ悍妫€鏌?|
+| `GET /config` | 鑾峰彇杩愯鏃堕厤缃?(鍚?local_ai_available 鍔ㄦ€佺姸鎬? |
+| `POST /jobs/create` | 鍒涘缓缈昏瘧浠诲姟 |
+| `POST /jobs/markUploaded` | 鏍囪涓婁紶瀹屾垚 |
+| `POST /jobs/start` | 鍚姩缈昏瘧 |
+| `GET /jobs/progress?jobId=` | 鏌ヨ浠诲姟杩涘害 |
+| `GET /jobs/download?jobId=` | 鑾峰彇缁撴灉涓嬭浇 URL |
+| `GET /jobs/list?deviceId=` | 鐢ㄦ埛浠诲姟鍒楄〃 |
+| `POST /jobs/delete` | 鍒犻櫎/鍙栨秷浠诲姟 |
+| `POST /billing/init` | 鍒濆鍖栫Н鍒?|
+| `GET /billing/balance?deviceId=` | 鏌ヨ绉垎浣欓 |
+| `POST /checkin` | 姣忔棩绛惧埌 |
+| `POST /checkin/status` | 绛惧埌鐘舵€佹煡璇?|
+| `POST /auth/sms/send` | 鍙戦€侀獙璇佺爜 |
+| `POST /auth/sms/verify` | 楠岃瘉鐮佺櫥褰?|
+| `POST /auth/profile` | 鐢ㄦ埛淇℃伅 |
+| `POST /auth/logout` | 閫€鍑虹櫥褰?|
 
-## Flutter 客户端打包
+## Flutter 瀹㈡埛绔墦鍖?
 
-在 `flutter_app/` 目录下执行。Web / Android / iOS 共用 `scripts/build_config.ps1`：
-- **备案后**：`$UseIpMode = $false`（默认），API 使用 `translate.air-inc.top/api`
-- **备案前**：`$UseIpMode = $true`，API 使用 `122.51.10.98:8082/api`
-- iOS 需同步修改 `build_ios_ipa_release.sh` 中的 `USE_IP_MODE`
+鍦?`flutter_app/` 鐩綍涓嬫墽琛屻€俉eb / Android / iOS 鍏辩敤 `scripts/build_config.ps1`锛?
+- **澶囨鍚?*锛歚$UseIpMode = $false`锛堥粯璁わ級锛孉PI 浣跨敤 `translate.air-inc.top/api`
+- **澶囨鍓?*锛歚$UseIpMode = $true`锛孉PI 浣跨敤 `122.51.10.98:8082/api`
+- iOS 闇€鍚屾淇敼 `build_ios_ipa_release.sh` 涓殑 `USE_IP_MODE`
 
 ```powershell
 cd flutter_app
@@ -256,11 +256,32 @@ cd flutter_app
 ./scripts/build_ios_ipa_release.sh            # iOS
 ```
 
-## 技术栈
+## 鎶€鏈爤
 
-- **服务端**: Node.js (cheerio EPUB 解析, PM2 进程管理)
-- **AI 推理**: vLLM (WSL2, OpenAI-compatible API) + frp 内网穿透
-- **AI 在线**: 腾讯混元翻译 API (ChatTranslations)
-- **AI 模型**: HY-MT1.5-7B-FP8 (腾讯混元翻译 v1.5)
-- **客户端**: Flutter (Material 3)
-- **存储**: 服务器本地文件系统 + 腾讯云 COS + 客户端本地缓存
+- **鏈嶅姟绔?*: Node.js (cheerio EPUB 瑙ｆ瀽, PM2 杩涚▼绠＄悊)
+- **AI 鎺ㄧ悊**: vLLM (WSL2, OpenAI-compatible API) + frp 鍐呯綉绌块€?
+- **AI 鍦ㄧ嚎**: 鑵捐娣峰厓缈昏瘧 API (ChatTranslations)
+- **AI 妯″瀷**: HY-MT1.5-7B-FP8 (鑵捐娣峰厓缈昏瘧 v1.5)
+- **瀹㈡埛绔?*: Flutter (Material 3)
+- **瀛樺偍**: 鏈嶅姟鍣ㄦ湰鍦版枃浠剁郴缁?+ 鑵捐浜?COS + 瀹㈡埛绔湰鍦扮紦瀛?
+
+## 服务端目录统一（2026-03）
+
+AirTranslate 的 Node 服务现在统一放在 `server/` 目录下，推荐服务器路径为 `/www/airtranslate/server`。
+
+首次部署：
+
+```bash
+scp -r server root@your-server:/www/airtranslate/
+ssh root@your-server "cd /www/airtranslate/server && npm install --omit=dev"
+ssh root@your-server "cd /www/airtranslate/server && pm2 start ecosystem.config.cjs"
+ssh root@your-server "pm2 save"
+```
+
+日常更新：
+
+```bash
+ssh root@your-server "cd /www/airtranslate/server && pm2 restart airtranslate"
+```
+
+`server/package-lock.json` 继续保留，不删除。它用于锁定 `cheerio` 及其子依赖版本，避免服务器重新安装依赖时出现版本漂移。
