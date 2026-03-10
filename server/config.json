@@ -1,0 +1,13 @@
+{
+  "checkin_enabled": true,
+  "checkin_points": 5000,
+  "initial_grant_points": 500000,
+  "billing_unit_chars": 100,
+  "billing_unit_cost": 1,
+  "online_ai_billing_multiplier": 100,
+  "local_ai_enabled": true,
+  "latest_version": "1.0.0",
+  "min_version": "1.0.0",
+  "update_url": "",
+  "announcement": ""
+}

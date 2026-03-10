@@ -1,0 +1,16 @@
+serverAddr = "122.51.10.98"
+serverPort = 7000
+
+[[proxies]]
+name = "vllm"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8000
+remotePort = 7001
+
+[[proxies]]
+name = "rdp_win"      # 这个名字随便起，方便区分
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 3389      # Windows RDP 默认端口
+remotePort = 7002     # 公网服务器访问端口，注意不要跟 7001 冲突
