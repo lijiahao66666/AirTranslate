@@ -1,38 +1,59 @@
-# AirTranslate（灵译）
+﻿# AirTranslate（灵译）
 
-AirTranslate 是一款专注于 EPUB 电子书的全本翻译工具。它利用先进的 AI 模型，提供高质量、保留格式的文档翻译服务。
+AirTranslate 是一款 EPUB 全本翻译工具，提供机器翻译与 AI 翻译两种模式，支持术语表、双语/纯译文输出与任务进度管理。服务端内置翻译任务队列、积分计费与本地 vLLM 接入能力。
 
-## 项目结构
+## 功能概览
 
-本项目采用统一的结构设计：
+- EPUB 解析与字数统计：上传后解析 EPUB 文本并统计字符数。
+- 翻译任务管理：任务创建、启动、进度追踪、结果下载。
+- 输出模式：双语对照或纯译文。
+- 术语表支持：支持 JSON 或文本术语表上传，AI 模式下生效。
+- 引擎选择：机器翻译、AI 在线翻译、AI 个人部署三种模式。
 
-- **client/**: Flutter 客户端源代码。
-- **server/**: Node.js 后端服务。
-- **scripts/**: 构建和部署脚本。
-- **frp/**: 内网穿透配置 (用于将本地 GPU 服务器的 LLM 能力暴露给公网)。
-- **test/**: 自动化测试脚本 (Python)，用于测试翻译引擎和 EPUB 处理。
+## 客户端功能细节
 
-## 技术栈
+- 引擎类型：
+  - MACHINE：机器翻译（免费）。
+  - AI_ONLINE：在线 AI 翻译（积分计费）。
+  - AI：个人部署（本地 vLLM，通过 FRP）。
+- 语言选择：支持自动识别与多语种目标语言。
+- 术语表：可上传或手动输入，支持 key=value 或 JSON 格式。
 
-- **客户端**: Flutter
-  - 动画: `flutter_animate`
-  - 文件处理: `archive`, `file_picker`
-- **服务端**: Node.js, Python
-- **AI**: 本地部署的大语言模型 (vLLM) 或远程 API。
+## 服务端功能
 
-## 部署指南
+- EPUB 解析：使用 `cheerio` 解析 EPUB 内部 XHTML。
+- 翻译引擎：
+  - 机器翻译：Azure Edge → MyMemory → Google 的多级兜底策略。
+  - AI 在线：腾讯混元翻译 API，支持术语表 Glossary。
+  - AI 个人：通过 FRP 访问本地 vLLM（HY-MT1.5-7B）。
+- 积分系统与任务队列：本地文件系统保存任务、积分、统计。
+- 远程配置接口 `/config`，控制计费与功能开关。
 
-### Web 端部署
+## 目录结构
 
-1. 运行构建脚本：
-   ```powershell
-   ./scripts/build_web_release.ps1
-   ```
-2. 将构建产物上传至云服务器宝塔面板的 HTML 站点目录。
-3. 访问域名：[translate.air-inc.top](https://translate.air-inc.top)
+- client/：Flutter 客户端
+- server/：Node.js 翻译服务
+- frp/：内网穿透工具
+- models/：本地模型缓存
+- logs/：服务日志
+- README.md：项目说明
 
-### 服务端部署
+## 本地运行
 
-1. 将 `server/` 目录上传至服务器。
-2. 安装依赖并启动服务。
-3. 若使用本地 LLM，需确保 FRP 服务正常运行，以便服务端能连接到推理引擎。
+客户端：
+```
+cd client
+flutter pub get
+flutter run
+```
+
+服务端：
+```
+cd server
+npm install
+node app.js
+```
+
+## 参考
+
+项目规范请查看 `product_rule.md`。
