@@ -1,4 +1,4 @@
-﻿. "$PSScriptRoot\build_config.ps1"
+. "$PSScriptRoot\build_config.ps1"
 
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $pubspecPath = Join-Path $projectRoot "pubspec.yaml"
@@ -11,8 +11,8 @@ Push-Location $projectRoot
 try {
   $env:GRADLE_USER_HOME = "$projectRoot\android\.gradle-cache"
 
-  flutter build appbundle --release 
-    --build-number $BUILD_NUMBER 
+  flutter build appbundle --release `
+    --build-number $BUILD_NUMBER `
     --dart-define=AIRTRANSLATE_API_URL=$API_URL `
     --dart-define=AIRTRANSLATE_API_KEY=$API_KEY
 
