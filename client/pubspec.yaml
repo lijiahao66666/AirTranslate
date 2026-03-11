@@ -1,7 +1,7 @@
-name: air_translate
-description: AirTranslate - EPUB全本翻译工具
+﻿name: air_translate
+description: AirTranslate - EPUB鍏ㄦ湰缈昏瘧宸ュ叿
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.0
 
 environment:
   sdk: ^3.5.0
@@ -30,3 +30,4 @@ flutter:
   uses-material-design: true
   assets:
     - web/icons/Icon-192.png
+

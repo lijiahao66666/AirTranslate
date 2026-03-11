@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${SCRIPT_DIR}/.."
+if [ ! -f "${PROJECT_ROOT}/pubspec.yaml" ]; then
+  echo "pubspec.yaml not found: ${PROJECT_ROOT}/pubspec.yaml" >&2
+  exit 1
+fi
+cd "${PROJECT_ROOT}"
+
 # 与 build_config.ps1 保持一致，备案前改为 1
 USE_IP_MODE=0
 
@@ -25,4 +33,4 @@ flutter build ipa --release \
 
 echo ""
 echo "IPA build done. (UseIpMode=$USE_IP_MODE)"
-echo "  output: build/ios/ipa/*.ipa"
+echo "  output: client/build/ios/ipa/*.ipa"

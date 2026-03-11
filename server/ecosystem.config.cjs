@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'airtranslate',
       script: 'app.js',
-      cwd: '/www/airtranslate/server',
+      cwd: '/www/airtranslate',
       instances: 1,
       exec_mode: 'fork',
       autorestart: true,
