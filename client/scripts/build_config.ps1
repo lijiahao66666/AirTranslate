@@ -1,13 +1,11 @@
-﻿# AirTranslate 鏋勫缓閰嶇疆 - Web / Android / iOS 鍏辩敤
+# AirTranslate 鏋勫缓閰嶇疆 - Web / Android / iOS 鍏辩敤
 # 鍒囨崲澶囨鍓?鍚庯細淇敼 $UseIpMode锛屾墍鏈夋墦鍖呰剼鏈細鍚屾浣跨敤
 $UseIpMode = $false   # 澶囨鍓嶆敼涓?$true
 
 if ($UseIpMode) {
-  # translate 绔欑偣鐩戝惉 8082锛岄渶甯︾鍙?
   $API_URL = "http://122.51.10.98:8082/api"
 } else {
-  # 涓庤闂煙鍚嶅悓婧愶紝閬垮厤 CORS
-  $API_URL = "http://translate.air-inc.top/api"
+  $API_URL = "https://translate.air-inc.top/api"
 }
 
 # API Key锛堜笌鏈嶅姟绔?.env 鐨?API_KEY 涓€鑷达紝鐢ㄤ簬閴存潈锛?

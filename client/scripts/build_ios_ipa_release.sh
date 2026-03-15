@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,10 +13,9 @@ cd "${PROJECT_ROOT}"
 USE_IP_MODE=0
 
 if [ "$USE_IP_MODE" = "1" ]; then
-  # translate 绔欑偣鐩戝惉 8082
   API_URL="http://122.51.10.98:8082/api"
 else
-  API_URL="http://translate.air-inc.top/api"
+  API_URL="https://translate.air-inc.top/api"
 fi
 
 # 涓庢湇鍔＄ .env 鐨?API_KEY 涓€鑷?
