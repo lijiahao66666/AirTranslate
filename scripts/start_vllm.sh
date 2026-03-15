@@ -16,7 +16,8 @@ python3 -m vllm.entrypoints.openai.api_server \
     --host 0.0.0.0 \
     --port 8000 \
     --dtype auto \
-    --max-model-len 8192 \
-    --gpu-memory-utilization 0.9 \
+    --max-model-len 4096 \
+    --gpu-memory-utilization 0.8 \
+    --swap-space 1 \
     --enforce-eager \
     --trust-remote-code
