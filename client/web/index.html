@@ -1,19 +1,6 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
-
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
-
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
-
-    This is a placeholder for base href that will be replaced by the value of
-    the `--base-href` argument provided to `flutter build`.
-  -->
   <base href="$FLUTTER_BASE_HREF">
 
   <meta charset="UTF-8">
@@ -21,19 +8,98 @@
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="灵译 - EPUB全本翻译工具">
 
-  <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="灵译">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
-  <!-- Favicon -->
   <link rel="icon" type="image/png" href="favicon.png"/>
 
   <title>灵译</title>
   <link rel="manifest" href="manifest.json">
+
+  <style>
+    #flutter-loading {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #E3F2FD 0%, #BBDEFB 100%);
+      z-index: 9999;
+      transition: opacity 0.3s ease-out;
+    }
+    #flutter-loading.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .loading-logo {
+      width: 72px;
+      height: 72px;
+      margin-bottom: 24px;
+      border-radius: 16px;
+      background: #1976D2;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 8px 24px rgba(25, 118, 210, 0.25);
+    }
+    .loading-logo img {
+      width: 56px;
+      height: 56px;
+      border-radius: 12px;
+    }
+    .loading-title {
+      font-size: 24px;
+      font-weight: 700;
+      color: #1565C0;
+      margin-bottom: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    .loading-subtitle {
+      font-size: 13px;
+      color: #1976D2;
+      margin-bottom: 32px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    .loading-spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid #90CAF9;
+      border-top-color: #1976D2;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
 </head>
 <body>
+  <div id="flutter-loading">
+    <div class="loading-logo">
+      <img src="icons/Icon-192.png" alt="Logo" />
+    </div>
+    <div class="loading-title">灵译</div>
+    <div class="loading-subtitle">EPUB全本翻译工具</div>
+    <div class="loading-spinner"></div>
+  </div>
+
+  <script>
+    window.addEventListener('flutter-first-frame', function() {
+      var loading = document.getElementById('flutter-loading');
+      if (loading) {
+        loading.classList.add('fade-out');
+        setTimeout(function() {
+          loading.remove();
+        }, 300);
+      }
+    });
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
